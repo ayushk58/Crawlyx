@@ -64,6 +64,7 @@ def classify_fetch_error(exc_or_msg):
         return 'ssl_error'
     return 'connection_error'
 
+from src.analysis.url_normalizer import normalize_url
 from src.core.rate_limiter import RateLimiter
 from src.core.seo_extractor import SEOExtractor
 from src.core.link_manager import LinkManager
@@ -84,7 +85,7 @@ class WebCrawler:
         # HTTP session
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'LibreCrawl/1.0 (Web Crawler)'
+            'User-Agent': 'Crawlyx/1.0 (Web Crawler)'
         })
 
         # Base URL tracking
@@ -111,7 +112,6 @@ class WebCrawler:
         # State flags
         self.is_running = False
         self.is_paused = False
-        self.is_running_pagespeed = False
 
         # Configuration
         self.config = self._get_default_config()
@@ -127,6 +127,10 @@ class WebCrawler:
 
         # Thread reference
         self.crawl_thread = None
+
+        # Crawl diagnostics (Crawl Health panel)
+        self.diagnostics = self._empty_diagnostics()
+        self._diag_lock = threading.Lock()
 
         # Robots.txt cache
         self._robots_cache = {}
@@ -149,6 +153,46 @@ class WebCrawler:
         # Enable nested asyncio for thread compatibility
         nest_asyncio.apply()
 
+    @staticmethod
+    def _empty_diagnostics():
+        """Fresh diagnostics counters for a crawl"""
+        return {
+            'robots_blocked': 0,
+            'timeouts': 0,
+            'dns_failures': 0,
+            'ssl_failures': 0,
+            'connection_errors': 0,
+            'js_render_failures': 0,
+            'depth_limited_urls': 0,
+            'stopped_by_max_urls': False,
+            'sitemap_found': None,  # None = discovery not attempted
+            'duplicate_url_variants': 0,
+            'parameterized_urls': 0
+        }
+
+    def _bump_diagnostic(self, key, amount=1):
+        """Thread-safe increment of a diagnostics counter"""
+        with self._diag_lock:
+            self.diagnostics[key] += amount
+
+    def _record_result_diagnostics(self, result):
+        """Aggregate fetch errors from a crawl result into diagnostics"""
+        error_type = result.get('error_type')
+        if not error_type:
+            return
+        key_map = {
+            'timeout': 'timeouts',
+            'dns_not_found': 'dns_failures',
+            'ssl_error': 'ssl_failures',
+            'connection_refused': 'connection_errors',
+            'connection_error': 'connection_errors'
+        }
+        key = key_map.get(error_type)
+        if key:
+            self._bump_diagnostic(key)
+        if self.config.get('enable_javascript', False) and result.get('status_code', 0) == 0:
+            self._bump_diagnostic('js_render_failures')
+
     def _get_default_config(self):
         """Get default configuration"""
         return {
@@ -157,7 +201,7 @@ class WebCrawler:
             'delay': 1.0,
             'follow_redirects': True,
             'crawl_external': False,
-            'user_agent': 'LibreCrawl/1.0 (Web Crawler)',
+            'user_agent': 'Crawlyx/1.0 (Web Crawler)',
             'timeout': 10,
             'retries': 3,
             'accept_language': 'en-US,en;q=0.9',
@@ -175,13 +219,12 @@ class WebCrawler:
             'proxy_url': None,
             'custom_headers': {},
             'discover_sitemaps': True,
-            'enable_pagespeed': False,
             'enable_javascript': False,
             'js_wait_time': 3,
             'js_timeout': 30,
             'js_browser': 'chromium',
             'js_headless': True,
-            'js_user_agent': 'LibreCrawl/1.0 (Web Crawler with JavaScript)',
+            'js_user_agent': 'Crawlyx/1.0 (Web Crawler with JavaScript)',
             'js_viewport_width': 1920,
             'js_viewport_height': 1080,
             'js_max_concurrent_pages': 3,
@@ -356,10 +399,12 @@ class WebCrawler:
         self.memory_monitor.start_monitoring()
         self.user_memory.reset()
         self._demo_limit_reached = False
+        self.diagnostics = self._empty_diagnostics()
 
     def _discover_and_add_sitemap_urls(self, base_url):
         """Discover sitemaps and add URLs to crawl queue"""
         sitemap_urls = self.sitemap_parser.discover_sitemaps(base_url)
+        self.diagnostics['sitemap_found'] = len(sitemap_urls) > 0
 
         added_count = 0
         filtered_count = 0
@@ -378,7 +423,6 @@ class WebCrawler:
         """Stop the current crawl"""
         self.is_running = False
         self.is_paused = False
-        self.is_running_pagespeed = False
 
         if self.crawl_thread and self.crawl_thread.is_alive():
             self.crawl_thread.join(timeout=5)
@@ -394,7 +438,7 @@ class WebCrawler:
             asyncio.run(self.js_renderer.cleanup())
             self.js_renderer = None
 
-        return True, "Crawl and PageSpeed analysis stopped"
+        return True, "Crawl stopped"
 
     def pause_crawl(self):
         """Pause the current crawl"""
@@ -597,17 +641,23 @@ class WebCrawler:
 
         print(f"get_status called - crawl_results length: {len(self.crawl_results)}, status: {status}, crawled: {self.stats['crawled']}")
 
+        # Merge link-manager diagnostics into crawl diagnostics
+        with self._diag_lock:
+            diagnostics = dict(self.diagnostics)
+        diagnostics['duplicate_url_variants'] = link_stats.get('duplicate_variants', 0)
+        diagnostics['parameterized_urls'] = link_stats.get('parameterized_urls', 0)
+
         return {
             'status': status,
             'stats': {
                 **self.stats,
                 'discovered': link_stats['discovered']
             },
+            'diagnostics': diagnostics,
             'urls': self.crawl_results.copy(),
             'links': self.link_manager.all_links.copy() if self.link_manager else [],
             'issues': self.issue_detector.get_issues() if self.issue_detector else [],
             'progress': min(100, (self.stats['crawled'] / max(link_stats['discovered'], 1)) * 100),
-            'is_running_pagespeed': self.is_running_pagespeed,
             'memory': self.memory_monitor.get_stats(),
             'memory_data': data_sizes,
             'demo_stopped': self._demo_limit_reached,
@@ -762,6 +812,7 @@ class WebCrawler:
 
                         # Skip if depth exceeded
                         if depth > self.config['max_depth']:
+                            self._bump_diagnostic('depth_limited_urls')
                             continue
 
                         # Submit crawl task immediately - rate limiting happens inside the worker
@@ -782,6 +833,9 @@ class WebCrawler:
                                         self.stats['crawled'] += 1
                                         self.stats['depth'] = max(self.stats['depth'], result.get('depth', 0))
                                         print(f"Added URL to results: {result['url']} - Total in results: {len(self.crawl_results)}")
+
+                                    # Track fetch-error diagnostics
+                                    self._record_result_diagnostics(result)
 
                                     # Track per-user memory
                                     self.user_memory.track_url(result)
@@ -813,6 +867,7 @@ class WebCrawler:
                     # Check for completion
                     if self.stats['crawled'] >= self.config['max_urls']:
                         print(f"Reached maximum URLs limit ({self.config['max_urls']})")
+                        self.diagnostics['stopped_by_max_urls'] = True
                         break
 
                     # Check if no more work
@@ -830,13 +885,6 @@ class WebCrawler:
 
         # Skip post-processing if demo limit was hit — no further memory use
         if not self._demo_limit_reached:
-            # Run PageSpeed analysis if enabled
-            if self.config.get('enable_pagespeed', False):
-                print("Running PageSpeed analysis...")
-                self.is_running_pagespeed = True
-                self._run_pagespeed_analysis()
-                self.is_running_pagespeed = False
-
             # Update all linked_from fields before completing
             self._update_all_linked_from()
 
@@ -917,6 +965,7 @@ class WebCrawler:
             # Create result structure
             result = {
                 'url': url,
+                'normalized_url': normalize_url(url, aggressive=True),
                 'status_code': response.status_code,
                 'error_type': None,
                 'content_type': response.headers.get('content-type', '').split(';')[0],
@@ -1051,6 +1100,7 @@ class WebCrawler:
             # Create result structure
             result = {
                 'url': url,
+                'normalized_url': normalize_url(url, aggressive=True),
                 'status_code': status_code,
                 'error_type': None,
                 'content_type': 'text/html',
@@ -1196,6 +1246,8 @@ class WebCrawler:
                         # Create task
                         task = asyncio.create_task(self._crawl_url_with_javascript(current_url, depth))
                         active_tasks.add(task)
+                    else:
+                        self._bump_diagnostic('depth_limited_urls')
 
                 # Process completed tasks
                 if active_tasks:
@@ -1210,6 +1262,9 @@ class WebCrawler:
                                     self.stats['crawled'] += 1
                                     self.stats['depth'] = max(self.stats['depth'], result.get('depth', 0))
                                     print(f"Added URL to results (JS): {result['url']} - Total in results: {len(self.crawl_results)}")
+
+                                # Track fetch-error diagnostics
+                                self._record_result_diagnostics(result)
 
                                 # Track per-user memory
                                 self.user_memory.track_url(result)
@@ -1242,13 +1297,8 @@ class WebCrawler:
 
                 await asyncio.sleep(0.001)
 
-            # Skip post-processing if demo limit was hit
-            if not self._demo_limit_reached:
-                # Run PageSpeed if enabled
-                if self.config.get('enable_pagespeed', False):
-                    self.is_running_pagespeed = True
-                    self._run_pagespeed_analysis()
-                    self.is_running_pagespeed = False
+            if self.stats['crawled'] >= self.config['max_urls']:
+                self.diagnostics['stopped_by_max_urls'] = True
 
         finally:
             if not self._demo_limit_reached:
@@ -1334,6 +1384,7 @@ class WebCrawler:
         # Check robots.txt
         if self.config['respect_robots']:
             if not self._check_robots_txt(url):
+                self._bump_diagnostic('robots_blocked')
                 return False
 
         # Check file extensions
@@ -1395,180 +1446,3 @@ class WebCrawler:
 
         except Exception:
             return True
-
-    def _run_pagespeed_analysis(self):
-        """Run PageSpeed analysis on selected pages"""
-        try:
-            selected_pages = self._select_pages_for_pagespeed()
-
-            if not selected_pages:
-                print("No suitable pages found for PageSpeed analysis")
-                return
-
-            print(f"Running PageSpeed analysis on {len(selected_pages)} pages...")
-
-            pagespeed_results = []
-            for i, page_url in enumerate(selected_pages):
-                if not self.is_running:
-                    print("PageSpeed analysis cancelled")
-                    return
-
-                print(f"Analyzing page {i+1}/{len(selected_pages)}: {page_url}")
-
-                # Mobile analysis
-                mobile_result = self._call_pagespeed_api(page_url, 'mobile')
-                time.sleep(2)
-
-                if not self.is_running:
-                    return
-
-                # Desktop analysis
-                desktop_result = self._call_pagespeed_api(page_url, 'desktop')
-
-                pagespeed_results.append({
-                    'url': page_url,
-                    'mobile': mobile_result,
-                    'desktop': desktop_result,
-                    'analysis_date': time.strftime('%Y-%m-%d %H:%M:%S')
-                })
-
-                if i < len(selected_pages) - 1:
-                    time.sleep(3)
-
-            self.stats['pagespeed_results'] = pagespeed_results
-            print(f"PageSpeed analysis completed for {len(pagespeed_results)} pages")
-
-        except Exception as e:
-            print(f"Error running PageSpeed analysis: {e}")
-
-    def _select_pages_for_pagespeed(self):
-        """Select homepage and 2 category pages for PageSpeed analysis"""
-        selected_pages = []
-
-        # Find homepage
-        homepage = None
-        min_path_length = float('inf')
-
-        for result in self.crawl_results:
-            if result.get('status_code') == 200 and result.get('is_internal'):
-                url = result['url']
-                parsed = urlparse(url)
-                path = parsed.path.rstrip('/')
-
-                if path == '' or path == '/':
-                    homepage = url
-                    break
-                elif len(path) < min_path_length:
-                    homepage = url
-                    min_path_length = len(path)
-
-        if homepage:
-            selected_pages.append(homepage)
-
-        # Find category pages
-        category_pages = []
-        for result in self.crawl_results:
-            if result.get('status_code') == 200 and result.get('is_internal'):
-                url = result['url']
-                parsed = urlparse(url)
-                path = parsed.path.strip('/')
-
-                if path and '/' not in path and url != homepage:
-                    category_pages.append(url)
-
-        selected_pages.extend(category_pages[:2])
-        return selected_pages
-
-    def _call_pagespeed_api(self, url, strategy='mobile', retries=3):
-        """Call Google PageSpeed Insights API"""
-        import random
-
-        try:
-            api_url = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
-            params = {
-                'url': url,
-                'strategy': strategy,
-                'category': 'performance'
-            }
-
-            if self.config.get('google_api_key'):
-                params['key'] = self.config['google_api_key']
-
-            for attempt in range(retries + 1):
-                try:
-                    response = requests.get(api_url, params=params, timeout=60)
-
-                    if response.status_code == 200:
-                        data = response.json()
-                        lighthouse_result = data.get('lighthouseResult', {})
-                        audits = lighthouse_result.get('audits', {})
-                        categories = lighthouse_result.get('categories', {})
-
-                        performance_score = None
-                        if 'performance' in categories:
-                            score = categories['performance'].get('score')
-                            if score is not None:
-                                performance_score = int(score * 100)
-
-                        metrics = {}
-
-                        if 'first-contentful-paint' in audits:
-                            fcp = audits['first-contentful-paint'].get('numericValue')
-                            metrics['first_contentful_paint'] = round(fcp / 1000, 2) if fcp else None
-
-                        if 'largest-contentful-paint' in audits:
-                            lcp = audits['largest-contentful-paint'].get('numericValue')
-                            metrics['largest_contentful_paint'] = round(lcp / 1000, 2) if lcp else None
-
-                        if 'cumulative-layout-shift' in audits:
-                            cls = audits['cumulative-layout-shift'].get('numericValue')
-                            metrics['cumulative_layout_shift'] = round(cls, 3) if cls else None
-
-                        if 'max-potential-fid' in audits:
-                            fid = audits['max-potential-fid'].get('numericValue')
-                            metrics['first_input_delay'] = round(fid, 2) if fid else None
-
-                        if 'speed-index' in audits:
-                            si = audits['speed-index'].get('numericValue')
-                            metrics['speed_index'] = round(si / 1000, 2) if si else None
-
-                        if 'interactive' in audits:
-                            tti = audits['interactive'].get('numericValue')
-                            metrics['time_to_interactive'] = round(tti / 1000, 2) if tti else None
-
-                        return {
-                            'success': True,
-                            'performance_score': performance_score,
-                            'metrics': metrics,
-                            'strategy': strategy
-                        }
-
-                    elif response.status_code == 429:
-                        if attempt < retries:
-                            delay = (2 ** attempt) * random.uniform(0.5, 1.5)
-                            print(f"Rate limited, retrying in {delay:.1f} seconds...")
-                            time.sleep(delay)
-                            continue
-
-                    return {
-                        'success': False,
-                        'error': f"API returned status {response.status_code}",
-                        'strategy': strategy
-                    }
-
-                except requests.exceptions.RequestException as e:
-                    if attempt < retries:
-                        time.sleep(3)
-                        continue
-                    return {
-                        'success': False,
-                        'error': f"Network error: {str(e)}",
-                        'strategy': strategy
-                    }
-
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e),
-                'strategy': strategy
-            }

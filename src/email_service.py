@@ -18,7 +18,7 @@ SMTP_PORT = int(get_env('SMTP_PORT', '587'))
 SMTP_USER = get_env('SMTP_USER', '')
 SMTP_PASSWORD = get_env('SMTP_PASSWORD', '')
 SMTP_FROM = get_env('SMTP_FROM', 'noreply@librecrawl.com')
-SMTP_FROM_NAME = get_env('SMTP_FROM_NAME', 'LibreCrawl')
+SMTP_FROM_NAME = get_env('SMTP_FROM_NAME', 'Crawlyx')
 
 # App URLs
 MAIN_APP_URL = get_env('MAIN_APP_URL', 'https://crawl.librecrawl.com')
@@ -45,11 +45,11 @@ def send_verification_email(to_email: str, username: str, token: str, app_source
     try:
         # Determine which app to link to
         if app_source == 'workshop':
-            app_name = "LibreCrawl Plugin Workshop"
+            app_name = "Crawlyx Plugin Workshop"
             app_url = WORKSHOP_APP_URL
             verify_url = f"{WORKSHOP_APP_URL}/verify?token={token}"
         else:
-            app_name = "LibreCrawl"
+            app_name = "Crawlyx"
             app_url = MAIN_APP_URL
             verify_url = f"{MAIN_APP_URL}/verify?token={token}"
 
@@ -77,7 +77,7 @@ This link will expire in 24 hours.
 If you did not request this, please ignore this email.
 
 Best regards,
-The LibreCrawl Team
+The Crawlyx Team
 """
         else:
             text = f"""
@@ -94,7 +94,7 @@ This link will expire in 24 hours.
 If you did not create this account, please ignore this email.
 
 Best regards,
-The LibreCrawl Team
+The Crawlyx Team
 """
 
         # HTML version
@@ -214,10 +214,10 @@ def send_welcome_email(to_email: str, username: str, app_source: str = 'main') -
     try:
         # Determine which app
         if app_source == 'workshop':
-            app_name = "LibreCrawl Plugin Workshop"
+            app_name = "Crawlyx Plugin Workshop"
             app_url = WORKSHOP_APP_URL
         else:
-            app_name = "LibreCrawl"
+            app_name = "Crawlyx"
             app_url = MAIN_APP_URL
 
         # Create message
@@ -236,7 +236,7 @@ Your account has been verified and you can now log in at:
 {app_url}
 
 Best regards,
-The LibreCrawl Team
+The Crawlyx Team
 """
 
         # HTML version

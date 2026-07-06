@@ -2,9 +2,11 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>LibreCrawl - SEO Spider</title>
+    <title>Crawlyx - Site Crawler & SEO Auditor</title>
     <link rel="stylesheet" href="/static/css/styles.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
 </head>
 <body>
@@ -12,9 +14,30 @@
         <!-- Header -->
         <header class="header">
             <div class="header-content">
-                <h1 class="app-title">LibreCrawl</h1>
+                <div class="header-left">
+                    <h1 class="app-title">Crawlyx</h1>
+                    <div id="drWidget" class="dr-widget dr-empty" aria-label="Domain Rating">
+                        <span id="drDomain" class="dr-domain"></span>
+                        <div class="dr-body">
+                            <div class="dr-ring-wrap" aria-hidden="true">
+                                <svg class="dr-ring" viewBox="0 0 40 40">
+                                    <circle class="dr-ring-bg" cx="20" cy="20" r="15" fill="none" stroke-width="6"/>
+                                    <circle id="drRingFill" class="dr-ring-fill" cx="20" cy="20" r="15" fill="none" stroke-width="6"
+                                        stroke-linecap="round"/>
+                                </svg>
+                            </div>
+                            <div class="dr-meta">
+                                <span class="dr-label-row">
+                                    Domain Rating
+                                    <span class="dr-info" title="Ahrefs Domain Rating (0–100) for the target domain. Free public API; measures backlink profile strength.">i</span>
+                                </span>
+                                <span id="drValue" class="dr-value">—</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
                 <div class="header-actions">
-                    <span id="userInfo" style="margin-right: 15px; color: #6b7280; font-size: 14px;"></span>
+                    <span id="userInfo" style="margin-right: 15px; color: var(--text-2); font-size: 13px;"></span>
                     <button class="btn btn-secondary" onclick="openDashboard()">Dashboard</button>
                     <button class="btn btn-secondary" onclick="openSettings()">Settings</button>
                     <button class="btn btn-secondary" onclick="exportData()">Export</button>
@@ -158,6 +181,48 @@
                 </div>
 
                 <div class="sidebar-section">
+                    <h3 class="sidebar-title">Crawl Health</h3>
+                    <div class="stats-container" id="crawlHealthContainer">
+                        <div class="stat-item">
+                            <span class="stat-label">Sitemap</span>
+                            <span class="stat-value" id="healthSitemap">—</span>
+                        </div>
+                        <div class="stat-item" title="URLs skipped because robots.txt disallows them">
+                            <span class="stat-label">Robots Blocked</span>
+                            <span class="stat-value" id="healthRobotsBlocked">0</span>
+                        </div>
+                        <div class="stat-item" title="Requests that timed out">
+                            <span class="stat-label">Timeouts</span>
+                            <span class="stat-value" id="healthTimeouts">0</span>
+                        </div>
+                        <div class="stat-item" title="DNS, SSL and connection failures">
+                            <span class="stat-label">Fetch Failures</span>
+                            <span class="stat-value" id="healthFetchFailures">0</span>
+                        </div>
+                        <div class="stat-item" title="URLs skipped because max crawl depth was reached">
+                            <span class="stat-label">Depth Limited</span>
+                            <span class="stat-value" id="healthDepthLimited">0</span>
+                        </div>
+                        <div class="stat-item" title="Discovered URLs that are variants of an already-seen URL (trailing slash, www, index.html...)">
+                            <span class="stat-label">Duplicate Variants</span>
+                            <span class="stat-value" id="healthDuplicates">0</span>
+                        </div>
+                        <div class="stat-item" title="Discovered URLs containing query parameters">
+                            <span class="stat-label">Parameterized URLs</span>
+                            <span class="stat-value" id="healthParameterized">0</span>
+                        </div>
+                        <div class="stat-item" title="Crawl stopped early because the max URL limit was hit" id="healthMaxUrlsRow" style="display: none;">
+                            <span class="stat-label">Max URL Limit</span>
+                            <span class="stat-value" style="color: #e67e22;">Reached</span>
+                        </div>
+                        <div class="stat-item" title="Pages that failed JavaScript rendering" id="healthJsFailuresRow" style="display: none;">
+                            <span class="stat-label">JS Render Failures</span>
+                            <span class="stat-value" id="healthJsFailures">0</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="sidebar-section">
                     <h3 class="sidebar-title">Data Size</h3>
                     <div class="stats-container">
                         <div class="stat-item">
@@ -190,7 +255,7 @@
                         <button class="tab-btn" onclick="switchTab('status-codes')">Status Codes</button>
                         <button class="tab-btn" onclick="switchTab('links')">Links</button>
                         <button class="tab-btn" onclick="switchTab('issues')">Issues</button>
-                        <button class="tab-btn" onclick="switchTab('pagespeed')">PageSpeed</button>
+                        <button class="tab-btn" onclick="switchTab('audit')">Audit</button>
                         <button class="tab-btn" onclick="switchTab('visualization')">Visualization</button>
                     </div>
 
@@ -283,17 +348,17 @@
                             <div class="links-tab-scroll-container">
                                 <div class="links-sections">
                                     <div class="links-section">
-                                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                                            <h3 class="links-section-title">🔗 Internal Links</h3>
-                                            <div style="display: flex; gap: 10px; align-items: center;">
-                                                <select onchange="filterInternalLinks(this.value)" style="padding: 6px 12px; border-radius: 6px; border: 1px solid #4b5563; background: #1f2937; color: white; font-size: 13px;">
+                                        <div class="links-section-toolbar">
+                                            <h3 class="links-section-title">Internal Links</h3>
+                                            <div class="links-section-controls">
+                                                <select class="control-select" onchange="filterInternalLinks(this.value)">
                                                     <option value="all">All Status Codes</option>
                                                     <option value="2xx">2xx Success</option>
                                                     <option value="3xx">3xx Redirect</option>
                                                     <option value="4xx">4xx Client Error</option>
                                                     <option value="5xx">5xx Server Error</option>
                                                 </select>
-                                                <input type="text" placeholder="Search..." oninput="searchInternalLinks(this.value)" style="padding: 6px 12px; border-radius: 6px; border: 1px solid #4b5563; background: #1f2937; color: white; font-size: 13px; width: 200px;">
+                                                <input type="text" class="control-input" placeholder="Search..." oninput="searchInternalLinks(this.value)" style="width: 200px;">
                                             </div>
                                         </div>
                                         <div class="table-container internal-links-container">
@@ -315,17 +380,17 @@
                                     </div>
 
                                     <div class="links-section">
-                                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                                            <h3 class="links-section-title">🌐 External Links</h3>
-                                            <div style="display: flex; gap: 10px; align-items: center;">
-                                                <select onchange="filterExternalLinks(this.value)" style="padding: 6px 12px; border-radius: 6px; border: 1px solid #4b5563; background: #1f2937; color: white; font-size: 13px;">
+                                        <div class="links-section-toolbar">
+                                            <h3 class="links-section-title">External Links</h3>
+                                            <div class="links-section-controls">
+                                                <select class="control-select" onchange="filterExternalLinks(this.value)">
                                                     <option value="all">All Status Codes</option>
                                                     <option value="2xx">2xx Success</option>
                                                     <option value="3xx">3xx Redirect</option>
                                                     <option value="4xx">4xx Client Error</option>
                                                     <option value="5xx">5xx Server Error</option>
                                                 </select>
-                                                <input type="text" placeholder="Search..." oninput="searchExternalLinks(this.value)" style="padding: 6px 12px; border-radius: 6px; border: 1px solid #4b5563; background: #1f2937; color: white; font-size: 13px; width: 200px;">
+                                                <input type="text" class="control-input" placeholder="Search..." oninput="searchExternalLinks(this.value)" style="width: 200px;">
                                             </div>
                                         </div>
                                         <div class="table-container external-links-container">
@@ -351,18 +416,18 @@
 
                         <div id="issues-tab" class="tab-pane">
                             <!-- Severity Filters -->
-                            <div class="filter-bar" style="margin-bottom: 20px; display: flex; gap: 10px; justify-content: center; align-items: center;">
-                                <button class="filter-item active" onclick="filterIssues('all')" data-filter="all" style="background: #374151; border: 1px solid #4b5563; color: white; padding: 8px 16px; border-radius: 6px; cursor: pointer; transition: all 0.2s; font-size: 14px; font-weight: 500; min-width: 120px;">
+                            <div class="filter-bar" style="margin: 14px 0 6px; display: flex; gap: 8px; justify-content: center; align-items: center;">
+                                <button class="chip active" onclick="filterIssues('all')" data-filter="all">
                                     All Issues <span id="issues-all-count" style="opacity: 0.7;">(0)</span>
                                 </button>
-                                <button class="filter-item" onclick="filterIssues('error')" data-filter="error" style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444; padding: 8px 16px; border-radius: 6px; cursor: pointer; transition: all 0.2s; font-size: 14px; font-weight: 500; min-width: 100px;">
-                                    <span>❌</span> Errors <span id="issues-error-count" style="opacity: 0.7;">(0)</span>
+                                <button class="chip chip-error" onclick="filterIssues('error')" data-filter="error">
+                                    Errors <span id="issues-error-count" style="opacity: 0.7;">(0)</span>
                                 </button>
-                                <button class="filter-item" onclick="filterIssues('warning')" data-filter="warning" style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); color: #f59e0b; padding: 8px 16px; border-radius: 6px; cursor: pointer; transition: all 0.2s; font-size: 14px; font-weight: 500; min-width: 120px;">
-                                    <span>⚠️</span> Warnings <span id="issues-warning-count" style="opacity: 0.7;">(0)</span>
+                                <button class="chip chip-warning" onclick="filterIssues('warning')" data-filter="warning">
+                                    Warnings <span id="issues-warning-count" style="opacity: 0.7;">(0)</span>
                                 </button>
-                                <button class="filter-item" onclick="filterIssues('info')" data-filter="info" style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); color: #3b82f6; padding: 8px 16px; border-radius: 6px; cursor: pointer; transition: all 0.2s; font-size: 14px; font-weight: 500; min-width: 90px;">
-                                    <span>ℹ️</span> Info <span id="issues-info-count" style="opacity: 0.7;">(0)</span>
+                                <button class="chip chip-info" onclick="filterIssues('info')" data-filter="info">
+                                    Info <span id="issues-info-count" style="opacity: 0.7;">(0)</span>
                                 </button>
                             </div>
 
@@ -394,16 +459,19 @@
                             </div>
                         </div>
 
-                        <div id="pagespeed-tab" class="tab-pane">
-                            <div class="pagespeed-container">
-                                <div class="pagespeed-header">
-                                    <h3>PageSpeed Insights Results</h3>
-                                    <p class="pagespeed-description">Performance analysis for homepage and category pages (powered by Google PageSpeed Insights)</p>
+                        <div id="audit-tab" class="tab-pane">
+                            <div style="padding: 16px 20px; overflow-y: auto; max-height: calc(100vh - 280px);">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                                    <h2 style="margin: 0; font-size: 18px;">Audit Summary</h2>
+                                    <div>
+                                        <button class="btn btn-secondary" onclick="loadAuditSummary(true)" style="margin-right: 8px;">Refresh</button>
+                                        <button class="btn btn-primary" onclick="downloadHtmlReport()">Download HTML Report</button>
+                                    </div>
                                 </div>
-                                <div id="pagespeedResults" class="pagespeed-results">
-                                    <div class="pagespeed-placeholder">
-                                        <p>🚀 PageSpeed analysis will appear here after crawl completion</p>
-                                        <p>Enable PageSpeed Analysis in settings to get Core Web Vitals and performance scores</p>
+                                <div id="auditContent">
+                                    <div class="empty-state-content" style="text-align: center; padding: 40px; color: #6b7280;">
+                                        <h3>No analysis yet</h3>
+                                        <p>Run a crawl, then open this tab to see prioritized issues, internal link intelligence, and content clusters.</p>
                                     </div>
                                 </div>
                             </div>
@@ -414,25 +482,16 @@
                                 <div class="visualization-header">
                                     <h3>Site Structure Visualization</h3>
                                     <div class="visualization-controls">
-                                        <select id="vizLayout" onchange="changeLayout(this.value)">
-                                            <option value="cose">Force-Directed</option>
-                                            <option value="breadthfirst">Hierarchical</option>
-                                            <option value="circle">Circle</option>
-                                            <option value="concentric">Concentric</option>
-                                            <option value="grid">Grid</option>
-                                        </select>
-                                        <select id="vizFilter" onchange="filterVisualization(this.value)">
-                                            <option value="all">All Pages</option>
-                                            <option value="html">HTML Only</option>
-                                            <option value="2xx">2xx Success</option>
-                                            <option value="3xx">3xx Redirects</option>
-                                            <option value="4xx">4xx Errors</option>
-                                            <option value="5xx">5xx Errors</option>
+                                        <select id="vizMode" onchange="changeVizMode(this.value)">
+                                            <option value="crawltree">Crawl Tree</option>
+                                            <option value="authority">Authority Flow</option>
                                         </select>
                                         <button class="btn btn-secondary" onclick="resetVisualization()">Reset View</button>
                                         <button class="btn btn-secondary" onclick="exportVisualizationImage()">Export PNG</button>
                                     </div>
                                 </div>
+                                <div id="vizBreadcrumb" class="viz-breadcrumb" style="display: none; margin: 8px 0;"></div>
+                                <div style="position: relative;">
                                 <div id="cy" class="graph-container">
                                     <div class="graph-placeholder">
                                         <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -450,7 +509,8 @@
                                         <p>Start crawling to visualize your site structure</p>
                                     </div>
                                 </div>
-                                <div class="visualization-legend">
+                                </div>
+                                <div class="visualization-legend" id="vizLegend">
                                     <div class="legend-item">
                                         <span class="legend-color" style="background: #10b981;"></span>
                                         <span>2xx Success</span>
@@ -565,7 +625,7 @@
 
                     <div class="setting-group">
                         <label for="userAgent">User Agent</label>
-                        <input type="text" id="userAgent" value="LibreCrawl/1.0 (Web Crawler)">
+                        <input type="text" id="userAgent" value="Crawlyx/1.0 (Web Crawler)">
                         <span class="setting-help">User agent string sent with requests</span>
                     </div>
 
@@ -611,22 +671,6 @@
                         <span class="setting-help">Automatically find and parse sitemap.xml files (including nested sitemaps)</span>
                     </div>
 
-                    <div class="setting-group">
-                        <label class="checkbox-label">
-                            <input type="checkbox" id="enablePageSpeed">
-                            Enable PageSpeed Analysis
-                        </label>
-                        <span class="setting-help">Run Google PageSpeed Insights on homepage and 2 category pages after crawl completes</span>
-                    </div>
-
-                    <div class="setting-group">
-                        <label for="googleApiKey">Google PageSpeed API Key</label>
-                        <input type="password" id="googleApiKey" placeholder="Enter your Google PageSpeed Insights API key">
-                        <span class="setting-help">
-                            API key for higher rate limits (25k requests/day vs limited without key).
-                            <a href="https://developers.google.com/speed/docs/insights/v5/get-started" target="_blank" style="color: #8b5cf6;">Get API key here</a>
-                        </span>
-                    </div>
                 </div>
 
                 <!-- Filter Settings -->
@@ -834,7 +878,7 @@
 
                     <div class="setting-group" id="jsUserAgentGroup" style="display: none;">
                         <label for="jsUserAgent">JavaScript User Agent</label>
-                        <input type="text" id="jsUserAgent" value="LibreCrawl/1.0 (Web Crawler with JavaScript)">
+                        <input type="text" id="jsUserAgent" value="Crawlyx/1.0 (Web Crawler with JavaScript)">
                         <span class="setting-help">User agent string for JavaScript-rendered pages</span>
                     </div>
 
@@ -855,8 +899,8 @@
                     </div>
 
                     <div class="setting-group" id="jsWarning" style="display: none;">
-                        <div style="background: rgba(251, 191, 36, 0.1); border: 1px solid rgba(251, 191, 36, 0.3); border-radius: 6px; padding: 12px; color: #fbbf24;">
-                            <strong>⚠️ Performance Impact</strong><br>
+                        <div style="background: rgba(217, 119, 6, 0.08); border: 1px solid rgba(217, 119, 6, 0.3); border-radius: 6px; padding: 12px; color: #92400e;">
+                            <strong>Performance Impact</strong><br>
                             JavaScript rendering is significantly slower than HTTP-only crawling. Use for sites with dynamic content or when static crawling produces incomplete results.
                         </div>
                     </div>
@@ -897,7 +941,7 @@
                 <!-- Custom CSS Settings -->
                 <div id="customcss-settings" class="settings-tab-content">
                     <h3>Custom CSS Styling</h3>
-                    <p class="setting-help">Write custom CSS to personalize the look and feel of the LibreCrawl interface. Changes apply immediately after saving.</p>
+                    <p class="setting-help">Write custom CSS to personalize the look and feel of the Crawlyx interface. Changes apply immediately after saving.</p>
 
                     <div class="setting-group">
                         <label for="customCSS">Custom CSS Code</label>
@@ -924,7 +968,7 @@
                     <div class="setting-group">
                         <div style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 6px; padding: 12px;">
                             <strong>🎨 Example Customizations:</strong><br><br>
-                            <code style="display: block; background: #1f2937; padding: 10px; border-radius: 4px; margin: 8px 0; font-size: 13px; color: #e5e7eb;">
+                            <code style="display: block; background: #f6f8fa; border: 1px solid #dfe3e8; padding: 10px; border-radius: 4px; margin: 8px 0; font-size: 12px; color: #2a2f38;">
                             /* Dark purple header */<br>
                             .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }<br><br>
                             /* Green accent buttons */<br>
@@ -1000,6 +1044,7 @@
         </div>
     </div>
 
+    <script src="/static/js/domain-rating.js"></script>
     <script src="/static/js/incremental_poller.js"></script>
     <script src="/static/js/virtual-scroller.js"></script>
     <script src="/static/js/column-resize.js"></script>

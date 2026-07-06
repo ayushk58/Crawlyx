@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Email Verification - LibreCrawl</title>
+    <title>Email Verification - Crawlyx</title>
     <style>
         * {
             margin: 0;
@@ -106,7 +106,7 @@
         <h1>Email Verified!</h1>
         <p class="message">{{ message }}</p>
         {% if redirect_url %}
-        <a href="{{ redirect_url }}" class="button">Go to {{ 'Workshop' if app_source == 'workshop' else 'LibreCrawl' }}</a>
+        <a href="{{ redirect_url }}" class="button">Go to {{ 'Workshop' if app_source == 'workshop' else 'Crawlyx' }}</a>
         <p class="auto-redirect">Redirecting automatically in <span id="countdown">5</span> seconds<span class="spinner"></span></p>
         {% else %}
         <a href="{{ url_for('login_page') }}" class="button">Go to Login</a>

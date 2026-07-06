@@ -1,5 +1,5 @@
 /**
- * LibreCrawl Plugin Loader
+ * Crawlyx Plugin Loader
  * Automatically discovers and loads plugins from /static/plugins/
  */
 
@@ -34,22 +34,24 @@ class PluginLoader {
     }
 
     /**
-     * Discover available plugins
-     * Currently uses a simple file list, but could be extended to:
-     * - Fetch from backend API
-     * - Parse directory listing
-     * - Use manifest file
+     * Discover available plugins via the backend API
+     * (files in /web/static/plugins/, excluding those starting with _).
+     * Falls back to a manual list if the API is unavailable.
      */
     async discoverPlugins() {
-        // For now, we'll manually list plugins here
-        // Users can add their plugin filenames to this array
-        const manualPlugins = [
-            // Add your plugin files here, e.g.:
-            'e-e-a-t.js',
-            // 'content-quality.js',
-        ];
+        try {
+            const response = await fetch('/api/plugins/list');
+            if (response.ok) {
+                const data = await response.json();
+                if (data.success && Array.isArray(data.plugins)) {
+                    return data.plugins;
+                }
+            }
+        } catch (error) {
+            console.warn('Plugin auto-discovery failed, using manual list:', error);
+        }
 
-        // Filter out disabled plugins (starting with _)
+        const manualPlugins = [];
         return manualPlugins.filter(file => !file.startsWith('_'));
     }
 
@@ -77,7 +79,7 @@ class PluginLoader {
     }
 
     /**
-     * Register a plugin (called by plugin files via LibreCrawlPlugin.register())
+     * Register a plugin (called by plugin files via CrawlyxPlugin.register())
      */
     registerPlugin(pluginConfig) {
         // Validate required fields
@@ -368,7 +370,7 @@ class PluginLoader {
 }
 
 // Global plugin API
-window.LibreCrawlPlugin = {
+window.CrawlyxPlugin = {
     loader: new PluginLoader(),
 
     /**
@@ -387,4 +389,4 @@ window.LibreCrawlPlugin = {
     }
 };
 
-console.log('🔌 LibreCrawl Plugin System loaded');
+console.log('Crawlyx Plugin System loaded');

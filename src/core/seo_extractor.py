@@ -262,8 +262,10 @@ class SEOExtractor:
         response). Values: 'dns_not_found', 'connection_refused', 'timeout',
         'ssl_error', 'connection_error', 'file_too_large', or None.
         """
+        from src.analysis.url_normalizer import normalize_url
         return {
             'url': url,
+            'normalized_url': normalize_url(url, aggressive=True),
             'status_code': status_code,
             'error_type': error_type,
             'content_type': '',

@@ -22,8 +22,7 @@ LibreCrawl crawls websites and gives you detailed information about pages, links
 - 🔄 **JavaScript rendering** for dynamic content (React, Vue, Angular, etc.)
 - 📊 **SEO analysis** - Extract titles, meta descriptions, headings, etc.
 - 🔗 **Link analysis** - Track internal and external links with detailed relationship mapping
-- 📈 **PageSpeed Insights integration** - Analyze Core Web Vitals
-- 💾 **Multiple export formats** - CSV, JSON, or XML
+- 💾 **Multiple export formats** - CSV, JSON, XML, or XLSX
 - 🔍 **Issue detection** - Automated SEO issue identification
 - ⚡ **Real-time crawling progress** with live statistics
 
@@ -279,8 +278,6 @@ Click "Settings" to configure:
 - **Custom CSS**: personalize the UI appearance with custom styles
 - **Issue exclusion**: patterns to exclude from SEO issue detection
 
-For PageSpeed analysis, add a Google API key in Settings > Requests for higher rate limits (25k/day vs limited).
-
 ## Export formats
 
 - **CSV**: Spreadsheet-friendly format
@@ -299,7 +296,6 @@ LibreCrawl supports multiple concurrent users with isolated sessions:
 
 ## Known limitations
 
-- PageSpeed API has rate limits (works better with API key)
 - Large sites may take time to crawl completely
 - JavaScript rendering is slower than HTTP-only crawling
 - Settings stored in localStorage (cleared if browser data is cleared)

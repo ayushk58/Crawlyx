@@ -1,34 +1,56 @@
 /**
  * Site Structure Visualization
- * Uses Cytoscape.js for interactive graph visualization
+ *
+ * Two sideways tree views (Screaming Frog style), aggregated server-side:
+ *  - Crawl Tree (default): hierarchy by shortest link path, depth <= 5.
+ *  - Authority Flow: pages hang off the source passing them the most
+ *    authority, depth <= 3; stronger flow = brighter, thicker line.
+ *
+ * Click a node to re-root its tree; '+N more' groups re-root at the parent.
  */
 
-let cy = null;  // Cytoscape instance
-let graphData = { nodes: [], edges: [] };  // Current graph data
-let currentLayout = 'cose';  // Current layout algorithm
-let currentFilter = 'all';  // Current filter
+let cy = null;
+let vizMode = 'crawltree';     // 'crawltree' | 'authority'
+let vizFocus = null;           // root URL of the current tree
+
+const CLUSTER_PALETTE = [
+    '#7c3aed', '#0e9f6e', '#2563eb', '#d97706', '#db2777',
+    '#0d9488', '#ea580c', '#65a30d', '#0891b2', '#c026d3'
+];
+
+function clusterColor(index) {
+    return CLUSTER_PALETTE[(index || 0) % CLUSTER_PALETTE.length];
+}
+
+function statusColor(code) {
+    if (code >= 200 && code < 300) return '#16a34a';
+    if (code >= 300 && code < 400) return '#2563eb';
+    if (code >= 400 && code < 500) return '#d97706';
+    if (code >= 500) return '#dc2626';
+    return '#98a2b3';
+}
 
 /**
- * Initialize the visualization when tab is opened
+ * Edge color for authority flow: interpolate from a faint gray (weak)
+ * to a deep emerald (strong), so the strongest flows stand out on the
+ * light background.
+ */
+function flowColor(t) {
+    const weak = [203, 209, 216];  // #cbd1d8
+    const strong = [17, 110, 61];  // #116e3d
+    const c = weak.map((w, i) => Math.round(w + (strong[i] - w) * t));
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+/**
+ * Initialize when the tab is opened
  */
 function initVisualization() {
-    if (cy) {
-        return; // Already initialized
-    }
+    if (cy) return;
 
     const container = document.getElementById('cy');
-    if (!container) {
-        console.error('Graph container not found');
-        return;
-    }
+    if (!container) return;
 
-    // Hide placeholder
-    const placeholder = container.querySelector('.graph-placeholder');
-    if (placeholder) {
-        placeholder.style.display = 'none';
-    }
-
-    // Initialize Cytoscape
     cy = cytoscape({
         container: container,
         elements: [],
@@ -40,77 +62,176 @@ function initVisualization() {
                     'label': 'data(label)',
                     'width': 'data(size)',
                     'height': 'data(size)',
-                    'font-size': '12px',
-                    'color': '#e5e7eb',
-                    'text-outline-color': '#1f2937',
+                    'font-size': '10px',
+                    'color': '#3d4654',
+                    'text-outline-color': '#ffffff',
                     'text-outline-width': 2,
                     'text-valign': 'bottom',
                     'text-halign': 'center',
-                    'text-margin-y': 5,
+                    'text-margin-y': 4,
+                    'text-wrap': 'ellipsis',
+                    'text-max-width': '110px',
                     'overlay-opacity': 0,
+                    'border-width': 1.5,
+                    'border-color': 'rgba(16,24,40,0.18)'
+                }
+            },
+            {
+                // Sideways tree nodes (crawl tree / authority flow):
+                // small open circles with the label beside them, SF-style
+                selector: 'node[?sideways]',
+                style: {
+                    'text-valign': 'center',
+                    'text-halign': 'right',
+                    'text-margin-x': 6,
+                    'text-margin-y': 0,
+                    'text-max-width': '190px'
+                }
+            },
+            {
+                selector: 'node[?open]',
+                style: {
+                    'background-color': '#ffffff',
+                    'border-color': 'data(color)',
+                    'border-width': 2
+                }
+            },
+            {
+                selector: 'node[type="dir"]',
+                style: {
+                    'shape': 'round-rectangle',
+                    'font-size': '11px',
+                    'font-weight': 'bold',
+                    'color': '#14181f',
                     'border-width': 2,
-                    'border-color': '#374151'
+                    'border-color': 'rgba(16,24,40,0.25)'
+                }
+            },
+            {
+                selector: 'node[type="pagegroup"]',
+                style: {
+                    'font-size': '10px',
+                    'text-valign': 'center',
+                    'text-halign': 'center',
+                    'text-margin-y': 0,
+                    'color': '#ffffff',
+                    'text-outline-width': 0,
+                    'font-weight': 'bold',
+                    'border-width': 0
+                }
+            },
+            {
+                selector: 'node[type="group"]',
+                style: {
+                    'shape': 'round-rectangle',
+                    'border-style': 'dashed',
+                    'border-color': '#98a2b3',
+                    'color': '#5b6572',
+                    'text-wrap': 'wrap',
+                    'text-max-width': '150px'
+                }
+            },
+            {
+                selector: 'node[type="problem"]',
+                style: {
+                    'border-color': '#b91c1c',
+                    'border-width': 2
+                }
+            },
+            {
+                selector: 'node[?is_orphan]',
+                style: {
+                    'border-style': 'dashed',
+                    'border-color': '#dc2626',
+                    'border-width': 2.5
+                }
+            },
+            {
+                selector: 'node[?is_root]',
+                style: {
+                    'border-color': '#14181f',
+                    'border-width': 3,
+                    'font-size': '12px',
+                    'font-weight': 'bold',
+                    'color': '#14181f',
+                    'text-halign': 'left',
+                    'text-margin-x': -6
                 }
             },
             {
                 selector: 'node:selected',
                 style: {
-                    'border-color': '#8b5cf6',
-                    'border-width': 3,
-                    'overlay-opacity': 0
+                    'border-color': '#178a4e',
+                    'border-width': 3
                 }
+            },
+            {
+                selector: 'node.dimmed',
+                style: { 'opacity': 0.25 }
             },
             {
                 selector: 'edge',
                 style: {
-                    'width': 2,
-                    'line-color': '#4b5563',
-                    'target-arrow-color': '#4b5563',
+                    'width': 1.2,
+                    'line-color': '#c4ccd6',
+                    'target-arrow-color': '#c4ccd6',
                     'target-arrow-shape': 'triangle',
+                    'arrow-scale': 0.7,
                     'curve-style': 'bezier',
-                    'arrow-scale': 1,
-                    'opacity': 0.6
+                    'opacity': 0.75
                 }
             },
             {
-                selector: 'edge:selected',
+                selector: 'edge[width]',
                 style: {
-                    'line-color': '#8b5cf6',
-                    'target-arrow-color': '#8b5cf6',
-                    'width': 3,
-                    'opacity': 1
+                    'width': 'data(width)'
                 }
+            },
+            {
+                // Authority edges: brightness + width encode flow strength
+                selector: 'edge[flowColor]',
+                style: {
+                    'line-color': 'data(flowColor)',
+                    'target-arrow-color': 'data(flowColor)',
+                    'opacity': 'data(flowOpacity)'
+                }
+            },
+            {
+                // Sideways tree connectors: smooth horizontal S-curves that
+                // leave the parent flat and arrive at the child flat
+                // (d3-style cubic links, as in Screaming Frog's tree graph)
+                selector: 'edge.tree-edge',
+                style: {
+                    'curve-style': 'unbundled-bezier',
+                    'edge-distances': 'node-position',
+                    'control-point-distances': ele => treeEdgeGeometry(ele).distances,
+                    'control-point-weights': ele => treeEdgeGeometry(ele).weights,
+                    'target-arrow-shape': 'none',
+                    'opacity': 0.55
+                }
+            },
+            {
+                selector: 'edge.dimmed',
+                style: { 'opacity': 0.1 }
             }
         ],
-        layout: {
-            name: 'preset'  // Use preset (no auto-layout on init)
-        },
+        layout: { name: 'preset' },
         wheelSensitivity: 0.2,
         minZoom: 0.1,
         maxZoom: 3
     });
 
-    // Add interaction handlers
     setupInteractions();
-
-    // Use already-loaded data if available, otherwise fetch from backend
-    if (graphData.nodes.length > 0) {
-        updateGraph();
-    } else {
-        loadVisualizationData();
-    }
+    loadFlowGraph(vizMode);
 }
 
 /**
- * Setup mouse interactions and tooltips
+ * Tooltips and click/drill interactions
  */
 function setupInteractions() {
-    if (!cy) return;
-
     let tooltip = null;
 
-    // Create tooltip element
-    function createTooltip() {
+    function getTooltip() {
         if (!tooltip) {
             tooltip = document.createElement('div');
             tooltip.className = 'cy-tooltip';
@@ -120,252 +241,323 @@ function setupInteractions() {
         return tooltip;
     }
 
-    // Show tooltip on hover
     cy.on('mouseover', 'node', function(event) {
-        const node = event.target;
-        const data = node.data();
-        const tooltip = createTooltip();
+        const d = event.target.data();
+        const tip = getTooltip();
 
-        // Build tooltip content
-        const statusClass = getStatusClass(data.status_code);
-        tooltip.innerHTML = `
-            <div class="tooltip-url">${truncateUrl(data.url)}</div>
-            <div class="tooltip-info">
-                <div><strong>Title:</strong> ${data.title || 'N/A'}</div>
-                <div class="tooltip-status ${statusClass}">Status: ${data.status_code}</div>
-            </div>
-        `;
-
-        tooltip.style.display = 'block';
+        if (d.type === 'group') {
+            tip.innerHTML = `
+                <div class="tooltip-url">${escapeVizHtml(d.label)}</div>
+                <div class="tooltip-info">${d.reroot_url ? '<div style="opacity:0.7;">Click to expand from here</div>' : ''}</div>`;
+        } else {
+            tip.innerHTML = `
+                <div class="tooltip-url">${escapeVizHtml(truncateUrl(d.url || '', 60))}</div>
+                <div class="tooltip-info">
+                    ${d.authority !== undefined ? `<div><strong>Authority:</strong> ${d.authority}</div>` : ''}
+                    <div>Status: ${d.status_code}</div>
+                    ${d.child_count ? `<div><strong>Children:</strong> ${d.child_count}</div>` : ''}
+                    ${d.is_orphan ? '<div style="color:#dc2626;">Orphan page</div>' : ''}
+                    <div style="opacity:0.7;">Click to re-root &middot; double-click to open</div>
+                </div>`;
+        }
+        tip.style.display = 'block';
     });
 
-    // Move tooltip with mouse
     cy.on('mousemove', 'node', function(event) {
-        const tooltip = createTooltip();
-        tooltip.style.left = (event.originalEvent.pageX + 10) + 'px';
-        tooltip.style.top = (event.originalEvent.pageY + 10) + 'px';
+        const tip = getTooltip();
+        tip.style.left = (event.originalEvent.pageX + 10) + 'px';
+        tip.style.top = (event.originalEvent.pageY + 10) + 'px';
     });
 
-    // Hide tooltip when mouse leaves
     cy.on('mouseout', 'node', function() {
-        const tooltip = createTooltip();
-        tooltip.style.display = 'none';
+        getTooltip().style.display = 'none';
     });
 
-    // Double-click to open URL in new tab
     cy.on('dblclick', 'node', function(event) {
-        const node = event.target;
-        const url = node.data('url');
-        if (url) {
-            window.open(url, '_blank');
-        }
+        const d = event.target.data();
+        if (d.url) window.open(d.url, '_blank');
     });
 
-    // Click to highlight connected nodes
     cy.on('tap', 'node', function(event) {
-        const node = event.target;
+        const d = event.target.data();
 
-        // Reset all nodes and edges
-        cy.elements().removeClass('highlighted').removeClass('dimmed');
-
-        // Highlight the selected node and its neighbors
-        const neighborhood = node.neighborhood().add(node);
-        neighborhood.addClass('highlighted');
-
-        // Dim everything else
-        cy.elements().not(neighborhood).addClass('dimmed');
-    });
-
-    // Click on background to reset
-    cy.on('tap', function(event) {
-        if (event.target === cy) {
-            cy.elements().removeClass('highlighted').removeClass('dimmed');
+        if (d.type === 'group' && d.reroot_url) {
+            loadFlowGraph(vizMode, d.reroot_url);
+            return;
         }
-    });
-}
-
-/**
- * Load visualization data from backend
- */
-async function loadVisualizationData() {
-    try {
-        const response = await fetch('/api/visualization_data');
-        const data = await response.json();
-
-        if (!data.success) {
-            console.error('Failed to load visualization data:', data.error);
+        if (d.type === 'page' && !d.is_root) {
+            loadFlowGraph(vizMode, d.url);
             return;
         }
 
-        graphData = {
-            nodes: data.nodes || [],
-            edges: data.edges || []
-        };
+        // Root tap: highlight direct neighborhood
+        cy.elements().removeClass('dimmed');
+        const neighborhood = event.target.neighborhood().add(event.target);
+        cy.elements().not(neighborhood).addClass('dimmed');
+    });
 
-        // Show warning if data was truncated
-        if (data.truncated) {
-            console.warn(`Showing ${data.visualized_pages} of ${data.total_pages} pages for performance`);
+    cy.on('tap', function(event) {
+        if (event.target === cy) {
+            cy.elements().removeClass('dimmed');
         }
-
-        // Update the graph
-        updateGraph();
-
-    } catch (error) {
-        console.error('Error loading visualization data:', error);
-    }
+    });
 }
 
 /**
- * Update the graph with current data and filters
+ * Switch mode from the select
  */
-function updateGraph() {
+function changeVizMode(mode) {
+    vizMode = mode === 'authority' ? 'authority' : 'crawltree';
+    vizFocus = null;
+
     if (!cy) {
         initVisualization();
         return;
     }
+    loadFlowGraph(vizMode);
+}
 
-    // Filter data based on current filter
-    let filteredNodes = graphData.nodes;
-    let filteredEdges = graphData.edges;
+/**
+ * Fetch a graph from the backend and render it
+ */
+async function loadFlowGraph(mode, focus = null) {
+    let url = `/api/visualization/graph?mode=${encodeURIComponent(mode)}`;
+    if (focus) url += `&focus=${encodeURIComponent(focus)}`;
 
-    if (currentFilter !== 'all') {
-        filteredNodes = graphData.nodes.filter(node => {
-            const statusCode = node.data.status_code;
+    try {
+        const response = await fetch(url);
+        const data = await response.json();
 
-            switch (currentFilter) {
-                case 'html':
-                    // Only show HTML pages (typically 2xx with no file extension or .html)
-                    const url = node.data.url;
-                    return statusCode >= 200 && statusCode < 300 &&
-                           (url.endsWith('/') || url.endsWith('.html') || url.endsWith('.htm') || !url.includes('.'));
-                case '2xx':
-                    return statusCode >= 200 && statusCode < 300;
-                case '3xx':
-                    return statusCode >= 300 && statusCode < 400;
-                case '4xx':
-                    return statusCode >= 400 && statusCode < 500;
-                case '5xx':
-                    return statusCode >= 500 && statusCode < 600;
-                default:
-                    return true;
+        if (!data.success) {
+            showVizMessage(data.error || 'No crawl data to visualize');
+            return;
+        }
+
+        vizMode = mode;
+        vizFocus = focus;
+
+        const nodes = data.nodes.map(n => {
+            const d = n.data;
+            d.sideways = true;
+            if (d.type === 'group') {
+                d.color = '#8b95a5';
+            } else {
+                // Uniform small open circles, SF-style; ring color carries
+                // the meaning (status in crawl tree, cluster in authority)
+                d.color = mode === 'authority'
+                    ? clusterColor(d.cluster_index)
+                    : statusColor(d.status_code);
+                d.open = true;
+                d.size = d.is_root ? 18 : 13;
             }
+            return { data: d };
         });
 
-        // Filter edges to only include edges where both nodes are present
-        const nodeIds = new Set(filteredNodes.map(n => n.data.id));
-        filteredEdges = graphData.edges.filter(edge =>
-            nodeIds.has(edge.data.source) && nodeIds.has(edge.data.target)
-        );
+        // Authority edges: stronger flow = brighter + more opaque line
+        const maxFlow = Math.max(...data.edges.map(e => e.data.flow || 0), 0);
+        const edges = data.edges.map(e => {
+            const d = e.data;
+            if (d.flow !== undefined && maxFlow > 0) {
+                const t = Math.sqrt(d.flow / maxFlow);  // sqrt: mid flows stay visible
+                d.flowColor = flowColor(t);
+                d.flowOpacity = +(0.35 + 0.6 * t).toFixed(2);
+            }
+            return { data: d };
+        });
+
+        cy.elements().remove();
+        cy.add([...nodes, ...edges]).edges().addClass('tree-edge');
+        applyFlowLayout(mode);
+
+        updateVizBreadcrumb();
+        renderVizLegend(mode, data.clusters);
+
+        const container = document.getElementById('cy');
+        const placeholder = container && container.querySelector('.graph-placeholder');
+        if (placeholder) placeholder.style.display = 'none';
+
+    } catch (error) {
+        console.error('Error loading graph:', error);
+        showVizMessage('Failed to load visualization data');
     }
-
-    // Update graph
-    cy.elements().remove();
-    cy.add([...filteredNodes, ...filteredEdges]);
-
-    // Apply layout
-    applyLayout(currentLayout);
 }
 
 /**
- * Apply a layout algorithm to the graph
+ * Refresh current view (called by app.js when crawl data changes)
  */
-function applyLayout(layoutName) {
+function loadVisualizationData() {
     if (!cy) return;
+    loadFlowGraph(vizMode, vizFocus);
+}
 
-    const layoutConfig = {
-        name: layoutName,
-        animate: 'end',  // Animate to end result, not during iterations
-        animationDuration: 500,
-        fit: true,
-        padding: 50,
-        boundingBox: undefined,
-        avoidOverlap: true
-    };
+function applyFlowLayout(mode) {
+    layoutSidewaysTree();
+}
 
-    // Add specific config for certain layouts
-    if (layoutName === 'cose') {
-        // More balanced values that won't cause numerical instability
-        layoutConfig.nodeRepulsion = 400000;
-        layoutConfig.nodeOverlap = 20;
-        layoutConfig.idealEdgeLength = 100;
-        layoutConfig.edgeElasticity = 100;
-        layoutConfig.nestingFactor = 5;
-        layoutConfig.gravity = 80;
-        layoutConfig.numIter = 1000;
-        layoutConfig.initialTemp = 200;
-        layoutConfig.coolingFactor = 0.95;
-        layoutConfig.minTemp = 1.0;
-        layoutConfig.randomize = true;
-        layoutConfig.componentSpacing = 200;      // Space between disconnected components
-    } else if (layoutName === 'breadthfirst') {
-        // Use crawl depth data for hierarchy instead of BFS graph distance,
-        // since nav links often make every page 1 hop from root in the graph.
-        // We use concentric layout with depth as the ranking to achieve this.
-        layoutConfig.name = 'concentric';
-        layoutConfig.minNodeSpacing = 50;
-        layoutConfig.concentric = function(node) {
-            // Higher value = closer to center; root (depth 0) should be center
-            const maxDepth = cy.nodes().max(function(n) { return n.data('depth') || 0; }).value || 1;
-            return maxDepth - (node.data('depth') || 0);
-        };
-        layoutConfig.levelWidth = function() {
-            return 1;
-        };
-        layoutConfig.sweep = Math.PI * 2;
-    } else if (layoutName === 'concentric') {
-        layoutConfig.minNodeSpacing = 100;
-        layoutConfig.concentric = function(node) {
-            return node.degree();
-        };
-        layoutConfig.levelWidth = function() {
-            return 2;
-        };
+/**
+ * Tidy tree layout (Screaming Frog crawl-tree style):
+ * root at the left, one column per depth level, leaves stacked evenly,
+ * and every parent vertically centered on its children's band.
+ */
+function layoutSidewaysTree() {
+    const COL_WIDTH = 270;   // horizontal gap between depth columns
+    const ROW_HEIGHT = 32;   // vertical gap between leaf rows
+
+    // Build the parent->children map; edge insertion order preserves the
+    // server's ranking, so children stay sorted top-to-bottom
+    const children = {};
+    const hasParent = new Set();
+    cy.edges().forEach(e => {
+        const s = e.source().id(), t = e.target().id();
+        (children[s] = children[s] || []).push(t);
+        hasParent.add(t);
+    });
+
+    let rootId = null;
+    cy.nodes().forEach(n => {
+        if (n.data('is_root')) rootId = n.id();
+    });
+    if (!rootId) {
+        const roots = cy.nodes().filter(n => !hasParent.has(n.id()));
+        rootId = roots.length ? roots[0].id() : (cy.nodes().length ? cy.nodes()[0].id() : null);
     }
+    if (!rootId) return;
 
-    const layout = cy.layout(layoutConfig);
-    layout.run();
+    const positions = {};
+    let nextRow = 0;
+    const visited = new Set();
+
+    (function place(id, depth) {
+        if (visited.has(id)) return;
+        visited.add(id);
+
+        const kids = (children[id] || []).filter(k => !visited.has(k));
+        if (kids.length === 0) {
+            positions[id] = { x: depth * COL_WIDTH, y: nextRow * ROW_HEIGHT };
+            nextRow++;
+        } else {
+            kids.forEach(k => place(k, depth + 1));
+            const ys = kids.map(k => positions[k].y);
+            positions[id] = {
+                x: depth * COL_WIDTH,
+                y: (Math.min(...ys) + Math.max(...ys)) / 2
+            };
+        }
+    })(rootId, 0);
+
+    // Anything disconnected stacks below the tree
+    cy.nodes().forEach(n => {
+        if (!positions[n.id()]) {
+            positions[n.id()] = { x: 0, y: nextRow * ROW_HEIGHT };
+            nextRow++;
+        }
+    });
+
+    cy.nodes().positions(n => positions[n.id()]);
+    cy.fit(50);
 }
 
 /**
- * Change the layout algorithm
+ * Control points for a horizontal cubic link between two placed nodes:
+ * the curve leaves the source flat and enters the target flat, bending
+ * in the middle (control points at mid-x on each node's row).
  */
-function changeLayout(layoutName) {
-    currentLayout = layoutName;
-    applyLayout(layoutName);
+function treeEdgeGeometry(ele) {
+    const s = ele.source().position();
+    const t = ele.target().position();
+    const dx = t.x - s.x;
+    const dy = t.y - s.y;
+    const len2 = dx * dx + dy * dy;
+    if (len2 < 1) return { distances: [0, 0], weights: [0.25, 0.75] };
+    const len = Math.sqrt(len2);
+    return {
+        distances: [-(dx * dy) / (2 * len), (dx * dy) / (2 * len)],
+        weights: [(dx * dx / 2) / len2, (dx * dx / 2 + dy * dy) / len2]
+    };
 }
 
 /**
- * Filter visualization by criteria
+ * Breadcrumb / context bar
  */
-function filterVisualization(filter) {
-    currentFilter = filter;
-    updateGraph();
+function updateVizBreadcrumb() {
+    const el = document.getElementById('vizBreadcrumb');
+    if (!el) return;
+    el.style.display = 'block';
+
+    const link = (label, onclick) =>
+        `<a href="#" onclick="${onclick}; return false;" style="color:#116e3d; text-decoration:none; font-weight:600;">${escapeVizHtml(label)}</a>`;
+    const sep = ' <span style="opacity:0.5;">&rsaquo;</span> ';
+
+    if (vizMode === 'authority') {
+        el.innerHTML = vizFocus
+            ? [link('Authority flow', "loadFlowGraph('authority')"),
+               `<strong>${escapeVizHtml(truncateUrl(vizFocus, 70))}</strong>`].join(sep)
+            : '<strong>Authority flow</strong> &mdash; authority flows left to right from the homepage (3 levels) &middot; brighter, thicker line = more authority passed';
+    } else {
+        el.innerHTML = vizFocus
+            ? [link('Crawl tree', "loadFlowGraph('crawltree')"),
+               `<strong>${escapeVizHtml(truncateUrl(vizFocus, 70))}</strong>`].join(sep)
+            : '<strong>Crawl tree</strong> &mdash; homepage at the left, each column is one more click away (max 5) &middot; click a page to re-root';
+    }
 }
 
 /**
- * Reset the view to show all nodes
+ * Legend per mode
+ */
+function renderVizLegend(mode, clusters) {
+    const el = document.getElementById('vizLegend');
+    if (!el) return;
+
+    const item = (color, label) =>
+        `<div class="legend-item"><span class="legend-color" style="background: ${color};"></span><span>${label}</span></div>`;
+    const note = text =>
+        `<div class="legend-item"><span style="opacity:0.7;">${text}</span></div>`;
+
+    if (mode === 'authority') {
+        const items = (clusters || []).slice(0, 8).map(c =>
+            item(clusterColor(c.color_index), `${escapeVizHtml(c.name)} (${c.page_count})`));
+        items.push(
+            `<div class="legend-item"><span class="legend-color" style="background: linear-gradient(to right, #cbd1d8, #116e3d); width: 36px; border-radius: 4px;"></span><span>weak &rarr; strong authority flow</span></div>`);
+        el.innerHTML = items.join('');
+    } else {
+        el.innerHTML = [
+            item('#16a34a', 'Page OK'),
+            item('#2563eb', 'Redirect'),
+            item('#d97706', '4xx'),
+            item('#dc2626', '5xx / error'),
+            item('#8b95a5', '+N more (click)'),
+            note('Ring color = status &middot; columns = link depth')
+        ].join('');
+    }
+}
+
+function showVizMessage(message) {
+    const container = document.getElementById('cy');
+    if (!container) return;
+    const placeholder = container.querySelector('.graph-placeholder');
+    if (placeholder) {
+        placeholder.style.display = 'block';
+        const p = placeholder.querySelector('p');
+        if (p) p.textContent = message;
+    }
+}
+
+/**
+ * Reset view / export / clear
  */
 function resetVisualization() {
     if (!cy) return;
-
-    cy.elements().removeClass('highlighted').removeClass('dimmed');
-    cy.fit(50);
-    cy.zoom(1);
+    cy.elements().removeClass('dimmed');
+    if (vizFocus) {
+        loadFlowGraph(vizMode);
+    } else {
+        cy.fit(50);
+    }
 }
 
-/**
- * Export visualization as PNG image
- */
 function exportVisualizationImage() {
     if (!cy) return;
-
-    const png = cy.png({
-        output: 'blob',
-        bg: '#1a1d29',
-        full: true,
-        scale: 2
-    });
-
+    const png = cy.png({ output: 'blob', bg: '#ffffff', full: true, scale: 2 });
     const url = URL.createObjectURL(png);
     const link = document.createElement('a');
     link.href = url;
@@ -374,151 +566,55 @@ function exportVisualizationImage() {
     URL.revokeObjectURL(url);
 }
 
-/**
- * Helper: Get status class for tooltip
- */
-function getStatusClass(statusCode) {
-    if (statusCode >= 200 && statusCode < 300) return 'status-2xx';
-    if (statusCode >= 300 && statusCode < 400) return 'status-3xx';
-    if (statusCode >= 400 && statusCode < 500) return 'status-4xx';
-    if (statusCode >= 500 && statusCode < 600) return 'status-5xx';
-    return 'status-other';
-}
-
-/**
- * Helper: Truncate URL for display
- */
-function truncateUrl(url, maxLength = 60) {
-    if (url.length <= maxLength) return url;
-    return url.substring(0, maxLength - 3) + '...';
-}
-
-/**
- * Clear the visualization
- */
 function clearVisualization() {
-    // Clear graph data
-    graphData = { nodes: [], edges: [] };
+    vizFocus = null;
 
-    // Clear the cytoscape graph if it exists
     if (cy) {
         cy.elements().remove();
-        cy.fit();
     }
 
-    // Show placeholder
     const container = document.getElementById('cy');
     if (container) {
         const placeholder = container.querySelector('.graph-placeholder');
         if (placeholder) {
             placeholder.style.display = 'block';
+            const p = placeholder.querySelector('p');
+            if (p) p.textContent = 'Start crawling to visualize your site structure';
         }
     }
-
-    console.log('Visualization cleared');
+    const breadcrumb = document.getElementById('vizBreadcrumb');
+    if (breadcrumb) breadcrumb.style.display = 'none';
 }
 
 /**
- * Update visualization from loaded crawl data (not from backend)
+ * Called when a saved crawl is loaded into the session
  */
 function updateVisualizationFromLoadedData(urls, links) {
-    if (!urls || urls.length === 0) {
-        console.log('No URL data to visualize');
-        return;
-    }
-
-    console.log(`Building visualization from ${urls.length} URLs and ${links ? links.length : 0} links`);
-
-    // Build nodes from URLs
-    const nodes = [];
-    const url_to_id = {};
-    const max_nodes = 500;
-    const pages_to_visualize = urls.slice(0, max_nodes);
-
-    for (let idx = 0; idx < pages_to_visualize.length; idx++) {
-        const page = pages_to_visualize[idx];
-        const url = page.url || '';
-        const status_code = page.status_code || 0;
-
-        // Assign color based on status code
-        let color = '#6b7280';
-        if (status_code >= 200 && status_code < 300) color = '#10b981';
-        else if (status_code >= 300 && status_code < 400) color = '#3b82f6';
-        else if (status_code >= 400 && status_code < 500) color = '#f59e0b';
-        else if (status_code >= 500 && status_code < 600) color = '#ef4444';
-
-        const node = {
-            data: {
-                id: `node-${idx}`,
-                label: url.split('/').pop() || url.split('//').pop() || url,
-                url: url,
-                status_code: status_code,
-                title: page.title || '',
-                color: color,
-                size: idx === 0 ? 30 : 20,
-                depth: page.depth || 0
-            }
-        };
-        nodes.push(node);
-        url_to_id[url] = `node-${idx}`;
-    }
-
-    // Build edges from links
-    const edges = [];
-    const edges_set = new Set();
-
-    if (links && links.length > 0) {
-        for (const link of links) {
-            if (link.is_internal) {
-                const source_url = link.source_url || '';
-                const target_url = link.target_url || '';
-
-                const source_id = url_to_id[source_url];
-                const target_id = url_to_id[target_url];
-
-                if (source_id && target_id && source_id !== target_id) {
-                    const edge_key = `${source_id}-${target_id}`;
-                    if (!edges_set.has(edge_key)) {
-                        edges_set.add(edge_key);
-                        edges.push({
-                            data: {
-                                id: `edge-${edge_key}`,
-                                source: source_id,
-                                target: target_id
-                            }
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    console.log(`Built ${nodes.length} nodes and ${edges.length} edges from loaded data`);
-
-    // Update global graph data
-    graphData = { nodes, edges };
-
-    // Hide placeholder
-    const container = document.getElementById('cy');
-    if (container) {
-        const placeholder = container.querySelector('.graph-placeholder');
-        if (placeholder) {
-            placeholder.style.display = 'none';
-        }
-    }
-
-    // If visualization is already initialized, update it
     if (cy) {
-        updateGraph();
+        loadFlowGraph(vizMode);
     }
+}
+
+/**
+ * Helpers
+ */
+function truncateUrl(url, maxLength = 60) {
+    if (!url || url.length <= maxLength) return url || '';
+    return url.substring(0, maxLength - 3) + '...';
+}
+
+function escapeVizHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text == null ? '' : String(text);
+    return div.innerHTML;
 }
 
 // Export functions to global scope
 window.initVisualization = initVisualization;
-window.changeLayout = changeLayout;
-window.filterVisualization = filterVisualization;
+window.changeVizMode = changeVizMode;
+window.loadFlowGraph = loadFlowGraph;
+window.loadVisualizationData = loadVisualizationData;
 window.resetVisualization = resetVisualization;
 window.exportVisualizationImage = exportVisualizationImage;
-window.loadVisualizationData = loadVisualizationData;
 window.updateVisualizationFromLoadedData = updateVisualizationFromLoadedData;
 window.clearVisualization = clearVisualization;

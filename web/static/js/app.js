@@ -45,13 +45,16 @@ document.addEventListener('DOMContentLoaded', async function() {
 
 async function initializeApp() {
     // Load plugins first (before tabs are initialized)
-    if (window.LibreCrawlPlugin && window.LibreCrawlPlugin.loader) {
-        await window.LibreCrawlPlugin.loader.loadAllPlugins();
-        window.LibreCrawlPlugin.loader.initializePlugins();
+    if (window.CrawlyxPlugin && window.CrawlyxPlugin.loader) {
+        await window.CrawlyxPlugin.loader.loadAllPlugins();
+        window.CrawlyxPlugin.loader.initializePlugins();
     }
 
     // Setup event listeners
     setupEventListeners();
+    if (typeof initDomainRating === 'function') {
+        initDomainRating();
+    }
 
     // Initialize tables
     initializeTables();
@@ -169,7 +172,7 @@ async function initializeApp() {
     // Set initial focus
     document.getElementById('urlInput').focus();
 
-    console.log('LibreCrawl initialized');
+    console.log('Crawlyx initialized');
 }
 
 function setupEventListeners() {
@@ -217,6 +220,9 @@ function startCrawl() {
 
     // Update the input field with the normalized URL
     urlInput.value = url;
+    if (typeof refreshDomainRating === 'function') {
+        refreshDomainRating(url);
+    }
 
     crawlState.isRunning = true;
     crawlState.isPaused = false;
@@ -299,6 +305,7 @@ function clearCrawlData() {
     crawlState.filters.active = null;
     crawlState.pendingLinks = null;
     crawlState.pendingIssues = null;
+    auditSummaryLoaded = false;
     updateStatusCodesTable();
 
     // Clear issues and reset badge
@@ -317,8 +324,8 @@ function clearCrawlData() {
     }
 
     // Notify plugins of data clear (send empty data)
-    if (window.LibreCrawlPlugin && window.LibreCrawlPlugin.loader) {
-        window.LibreCrawlPlugin.loader.notifyDataUpdate({
+    if (window.CrawlyxPlugin && window.CrawlyxPlugin.loader) {
+        window.CrawlyxPlugin.loader.notifyDataUpdate({
             urls: [],
             links: [],
             issues: [],
@@ -341,6 +348,9 @@ function clearCrawlData() {
 
     // Reset URL input
     document.getElementById('urlInput').value = '';
+    if (typeof refreshDomainRating === 'function') {
+        refreshDomainRating('');
+    }
     document.getElementById('urlInput').focus();
 }
 
@@ -399,9 +409,7 @@ function pollCrawlProgress() {
             updateCrawlData(data);
 
             // Update bottom status bar based on current state
-            if (data.is_running_pagespeed) {
-                updateStatus('Running PageSpeed analysis...');
-            } else if (data.status === 'running') {
+            if (data.status === 'running') {
                 updateStatus('Crawling in progress...');
             }
 
@@ -428,8 +436,8 @@ function pollCrawlProgress() {
                     loadVisualizationData();
                 }
                 // Notify plugins that crawl is complete
-                if (window.LibreCrawlPlugin && window.LibreCrawlPlugin.loader) {
-                    window.LibreCrawlPlugin.loader.notifyCrawlComplete({
+                if (window.CrawlyxPlugin && window.CrawlyxPlugin.loader) {
+                    window.CrawlyxPlugin.loader.notifyCrawlComplete({
                         urls: crawlState.urls,
                         links: crawlState.links,
                         issues: crawlState.issues,
@@ -452,11 +460,62 @@ function updateCrawlData(data) {
     crawlState.stats = data.stats || crawlState.stats;
     updateStatsDisplay();
 
+    // Update crawl health diagnostics
+    if (data.diagnostics) {
+        updateCrawlHealth(data.diagnostics);
+    }
+
+    // Invalidate cached audit summary while new data is coming in
+    if (data.status === 'running') {
+        auditSummaryLoaded = false;
+    }
+
     // Update memory statistics
     if (data.memory && data.memory_data) {
         updateMemoryDisplay(data.memory, data.memory_data);
     }
+    updateCrawlTables(data);
+}
 
+function updateCrawlHealth(diag) {
+    const setValue = (id, value, warnWhenPositive) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = value;
+        if (warnWhenPositive) {
+            el.style.color = (typeof value === 'number' && value > 0) ? '#e67e22' : '';
+        }
+    };
+
+    if (diag.sitemap_found === true) {
+        setValue('healthSitemap', 'Found');
+    } else if (diag.sitemap_found === false) {
+        const el = document.getElementById('healthSitemap');
+        if (el) { el.textContent = 'Not found'; el.style.color = '#e67e22'; }
+    } else {
+        setValue('healthSitemap', '—');
+    }
+
+    setValue('healthRobotsBlocked', diag.robots_blocked || 0, true);
+    setValue('healthTimeouts', diag.timeouts || 0, true);
+    const fetchFailures = (diag.dns_failures || 0) + (diag.ssl_failures || 0) + (diag.connection_errors || 0);
+    setValue('healthFetchFailures', fetchFailures, true);
+    setValue('healthDepthLimited', diag.depth_limited_urls || 0, true);
+    setValue('healthDuplicates', diag.duplicate_url_variants || 0, true);
+    setValue('healthParameterized', diag.parameterized_urls || 0, false);
+
+    const maxUrlsRow = document.getElementById('healthMaxUrlsRow');
+    if (maxUrlsRow) maxUrlsRow.style.display = diag.stopped_by_max_urls ? '' : 'none';
+
+    const jsRow = document.getElementById('healthJsFailuresRow');
+    if (jsRow) {
+        const jsFailures = diag.js_render_failures || 0;
+        jsRow.style.display = jsFailures > 0 ? '' : 'none';
+        setValue('healthJsFailures', jsFailures, true);
+    }
+}
+
+function updateCrawlTables(data) {
     // Update tables with new URLs
     if (data.urls) {
         data.urls.forEach(url => {
@@ -498,14 +557,9 @@ function updateCrawlData(data) {
     updateProgress(data.progress || 0);
     updateProgressText(data);
 
-    // Update PageSpeed results if available
-    if (data.stats && data.stats.pagespeed_results) {
-        displayPageSpeedResults(data.stats.pagespeed_results);
-    }
-
     // Notify plugins of data update
-    if (window.LibreCrawlPlugin && window.LibreCrawlPlugin.loader) {
-        window.LibreCrawlPlugin.loader.notifyDataUpdate({
+    if (window.CrawlyxPlugin && window.CrawlyxPlugin.loader) {
+        window.CrawlyxPlugin.loader.notifyDataUpdate({
             urls: crawlState.urls,
             links: crawlState.links,
             issues: crawlState.issues,
@@ -518,9 +572,7 @@ function updateProgressText(data) {
     const progressText = document.getElementById('progressText');
     if (!progressText) return;
 
-    if (data.is_running_pagespeed) {
-        progressText.textContent = 'Running PageSpeed analysis...';
-    } else if (data.status === 'completed') {
+    if (data.status === 'completed') {
         progressText.textContent = 'Crawl completed';
     } else if (data.status === 'running') {
         const stats = data.stats || crawlState.stats;
@@ -646,20 +698,20 @@ function showDemoLimitNotification() {
 
     const box = document.createElement('div');
     box.style.cssText = `
-        background: #1a1a2e; border: 1px solid #f59e0b; border-radius: 12px;
+        background: #ffffff; border: 1px solid #dfe3e8; border-radius: 12px;
         padding: 32px 40px; max-width: 480px; text-align: center;
-        color: #e0e0e0; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+        color: #2a2f38; box-shadow: 0 20px 50px rgba(16,24,40,0.16);
     `;
     box.innerHTML = `
         <div style="font-size: 28px; margin-bottom: 12px;">&#9888;</div>
-        <h2 style="color: #f59e0b; margin: 0 0 12px; font-size: 18px;">Demo Memory Limit Reached</h2>
+        <h2 style="color: #b45309; margin: 0 0 12px; font-size: 18px;">Demo Memory Limit Reached</h2>
         <p style="margin: 0 0 16px; line-height: 1.5; font-size: 14px;">
             This user has reached the 1.5 GB per-user memory limit.<br>
             Your crawl data has been saved automatically.<br><br>
             <strong>This is a free demo and is not intended for production use.</strong>
         </p>
         <button id="demoLimitDismiss" style="
-            background: #f59e0b; color: #000; border: none; padding: 10px 28px;
+            background: #178a4e; color: #fff; border: none; padding: 10px 28px;
             border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 14px;
         ">OK</button>
     `;
@@ -1066,6 +1118,11 @@ function switchTab(tabName) {
         crawlState.pendingIssues = null; // Clear pending data
     }
 
+    // Load audit summary if switching to Audit tab
+    if (tabName === 'audit') {
+        loadAuditSummary();
+    }
+
     // Initialize visualization if switching to Visualization tab
     if (tabName === 'visualization' && typeof initVisualization === 'function') {
         // Small delay to ensure the tab is visible before initializing
@@ -1083,11 +1140,11 @@ function switchTab(tabName) {
 
 // Handle plugin tab activation
 function handlePluginTabSwitch(tabName) {
-    if (!window.LibreCrawlPlugin || !window.LibreCrawlPlugin.loader) {
+    if (!window.CrawlyxPlugin || !window.CrawlyxPlugin.loader) {
         return;
     }
 
-    const loader = window.LibreCrawlPlugin.loader;
+    const loader = window.CrawlyxPlugin.loader;
 
     // Deactivate previously active plugin
     if (loader.activePluginId && loader.activePluginId !== tabName) {
@@ -1108,45 +1165,9 @@ function filterIssues(filterType) {
     // Store the active filter
     crawlState.filters.issueFilter = filterType;
 
-    // Update active button state and colors
-    document.querySelectorAll('#issues-tab .filter-item').forEach(btn => {
-        btn.classList.remove('active');
-        const filter = btn.getAttribute('data-filter');
-
-        if (filter === filterType) {
-            btn.classList.add('active');
-            // Set active state colors
-            if (filter === 'all') {
-                btn.style.background = '#374151';
-                btn.style.borderColor = '#4b5563';
-                btn.style.color = 'white';
-            } else if (filter === 'error') {
-                btn.style.background = 'rgba(239, 68, 68, 0.2)';
-                btn.style.borderColor = 'rgba(239, 68, 68, 0.5)';
-            } else if (filter === 'warning') {
-                btn.style.background = 'rgba(245, 158, 11, 0.2)';
-                btn.style.borderColor = 'rgba(245, 158, 11, 0.5)';
-            } else if (filter === 'info') {
-                btn.style.background = 'rgba(59, 130, 246, 0.2)';
-                btn.style.borderColor = 'rgba(59, 130, 246, 0.5)';
-            }
-        } else {
-            // Reset inactive state colors
-            if (filter === 'all') {
-                btn.style.background = 'transparent';
-                btn.style.borderColor = '#4b5563';
-                btn.style.color = '#9ca3af';
-            } else if (filter === 'error') {
-                btn.style.background = 'rgba(239, 68, 68, 0.1)';
-                btn.style.borderColor = 'rgba(239, 68, 68, 0.3)';
-            } else if (filter === 'warning') {
-                btn.style.background = 'rgba(245, 158, 11, 0.1)';
-                btn.style.borderColor = 'rgba(245, 158, 11, 0.3)';
-            } else if (filter === 'info') {
-                btn.style.background = 'rgba(59, 130, 246, 0.1)';
-                btn.style.borderColor = 'rgba(59, 130, 246, 0.3)';
-            }
-        }
+    // Update active button state; colors come from the .chip CSS classes
+    document.querySelectorAll('#issues-tab .filter-bar .chip').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-filter') === filterType);
     });
 
     // Filter issues data and update virtual scroller
@@ -1639,7 +1660,15 @@ async function exportData() {
             showNotification(`Exporting ${exportData.files.length} files...`, 'success');
         } else {
             // Single file download (original logic)
-            const blob = new Blob([exportData.content], { type: exportData.mimetype });
+            let blobContent = exportData.content;
+            if (exportData.encoding === 'base64') {
+                // Binary formats (e.g. XLSX) are sent base64-encoded
+                const binary = atob(exportData.content);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                blobContent = bytes;
+            }
+            const blob = new Blob([blobContent], { type: exportData.mimetype });
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.style.display = 'none';
@@ -1657,6 +1686,174 @@ async function exportData() {
         console.error('Export error:', error);
         showNotification('Export failed', 'error');
     }
+}
+
+// ===== Audit tab =====
+
+let auditSummaryLoaded = false;
+
+async function loadAuditSummary(force = false) {
+    if (auditSummaryLoaded && !force) return;
+
+    const container = document.getElementById('auditContent');
+    if (!container) return;
+
+    container.innerHTML = '<p style="color:#6b7280; padding: 20px;">Analyzing crawl data...</p>';
+
+    try {
+        const response = await fetch('/api/analysis/summary');
+        const data = await response.json();
+
+        if (!data.success) {
+            container.innerHTML = `<p style="color:#6b7280; padding: 20px;">${escapeHtml(data.error || 'Analysis failed')}</p>`;
+            return;
+        }
+
+        renderAuditSummary(data.summary);
+        auditSummaryLoaded = true;
+        loadSimilaritySection();
+    } catch (error) {
+        console.error('Audit summary error:', error);
+        container.innerHTML = '<p style="color:#ef4444; padding: 20px;">Failed to load audit summary.</p>';
+    }
+}
+
+function renderAuditSummary(s) {
+    const container = document.getElementById('auditContent');
+    if (!container) return;
+
+    const sevColors = { critical: '#dc2626', high: '#ea580c', medium: '#d97706', low: '#98a2b3' };
+    const sevBadge = sev =>
+        `<span style="background:${sevColors[sev] || '#98a2b3'}; color:#fff; padding:2px 8px; border-radius:10px; font-size:12px;">${escapeHtml(sev)}</span>`;
+    const card = (num, label, color) =>
+        `<div class="audit-card">
+            <div class="audit-card-value" ${color ? `style="color:${color};"` : ''}>${num}</div>
+            <div class="audit-card-label">${label}</div>
+        </div>`;
+
+    const sev = s.severity_counts || {};
+    const lr = s.link_reports || {};
+
+    let html = '<div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px;">';
+    html += card(s.site_score, 'Site score / 100');
+    html += card(s.internal_pages, 'Pages crawled');
+    html += card(s.total_issues, 'Issues');
+    html += card(sev.critical || 0, 'Critical groups', sevColors.critical);
+    html += card(sev.high || 0, 'High groups', sevColors.high);
+    html += card(lr.orphan_count || 0, 'Orphan pages');
+    html += card(lr.broken_internal_links_count || 0, 'Broken internal links');
+    html += '</div>';
+
+    // Top issue groups
+    html += '<h3 style="font-size:15px; margin: 16px 0 8px;">Top Problems</h3>';
+    const groups = s.top_issues || [];
+    if (groups.length === 0) {
+        html += '<p style="color:#6b7280;">No issues detected.</p>';
+    } else {
+        html += '<table class="data-table" style="width:100%;"><thead><tr><th>Priority</th><th>Issue</th><th>Affected</th><th>Recommended Fix</th></tr></thead><tbody>';
+        groups.forEach(g => {
+            const examples = (g.example_urls || []).slice(0, 3)
+                .map(u => `<div style="font-size:11px; opacity:0.6; word-break:break-all;">${escapeHtml(u)}</div>`).join('');
+            const cause = g.likely_cause
+                ? `<div style="font-size:12px; opacity:0.7;">Likely cause: ${escapeHtml(g.likely_cause)}</div>` : '';
+            html += `<tr>
+                <td>${sevBadge(g.severity)}<div style="font-size:11px; opacity:0.6;">${g.priority_score}</div></td>
+                <td><strong>${escapeHtml(g.issue)}</strong><div style="font-size:12px; opacity:0.6;">${escapeHtml(g.category)}</div>${cause}</td>
+                <td>${g.affected_url_count} pages${examples}</td>
+                <td style="font-size:13px;">${escapeHtml(g.recommended_fix)}</td>
+            </tr>`;
+        });
+        html += '</tbody></table>';
+    }
+
+    // Clusters
+    const clusters = s.clusters || [];
+    if (clusters.length > 0) {
+        html += '<h3 style="font-size:15px; margin: 20px 0 8px;">Content Clusters</h3>';
+        html += '<table class="data-table" style="width:100%;"><thead><tr><th>Cluster</th><th>Pages</th><th>Avg Authority</th><th>Top Page</th><th>Orphans</th></tr></thead><tbody>';
+        clusters.slice(0, 15).forEach(c => {
+            const topPage = c.top_authority_page ? c.top_authority_page.url : '-';
+            html += `<tr>
+                <td>${escapeHtml(c.name)}</td>
+                <td>${c.size}</td>
+                <td>${c.avg_authority !== null && c.avg_authority !== undefined ? c.avg_authority : '-'}</td>
+                <td style="font-size:12px; word-break:break-all;">${escapeHtml(topPage)}</td>
+                <td>${c.orphan_count || 0}</td>
+            </tr>`;
+        });
+        html += '</tbody></table>';
+    }
+
+    html += '<div id="auditSimilarity"><p style="color:#6b7280; margin-top:20px;">Analyzing content similarity...</p></div>';
+
+    container.innerHTML = html;
+}
+
+async function loadSimilaritySection() {
+    const el = document.getElementById('auditSimilarity');
+    if (!el) return;
+
+    try {
+        const response = await fetch('/api/analysis/content_similarity');
+        const data = await response.json();
+
+        if (!data.success) {
+            el.innerHTML = '';
+            return;
+        }
+        renderSimilaritySection(el, data);
+    } catch (error) {
+        console.error('Similarity analysis error:', error);
+        el.innerHTML = '';
+    }
+}
+
+function renderSimilaritySection(el, data) {
+    const gradeColors = { F: '#dc2626', D: '#ea580c', C: '#d97706', B: '#65a30d', A: '#16a34a' };
+    const gradeBadge = g =>
+        `<span style="background:${gradeColors[g] || '#95a5a6'}; color:#fff; padding:2px 10px; border-radius:10px; font-size:13px; font-weight:700;">${g}</span>`;
+
+    let html = '<h3 style="font-size:15px; margin: 20px 0 4px;">Similar Content</h3>';
+    html += `<p style="font-size:12px; color:#6b7280; margin: 0 0 8px;">Content similarity from titles, descriptions and headings (${data.analyzed_count} pages analyzed). F = near-duplicates that need consolidation, A = mild overlap.</p>`;
+
+    const clusters = data.clusters || [];
+    if (clusters.length === 0) {
+        html += '<p style="color:#6b7280;">No similar-content clusters found.</p>';
+    } else {
+        html += '<table class="data-table" style="width:100%;"><thead><tr><th>Grade</th><th>Pages</th><th>Avg Similarity</th><th>Examples</th></tr></thead><tbody>';
+        clusters.slice(0, 15).forEach(c => {
+            const examples = c.urls.slice(0, 3)
+                .map(u => `<div style="font-size:11px; opacity:0.6; word-break:break-all;">${escapeHtml(u)}</div>`).join('');
+            const more = c.size > 3 ? `<div style="font-size:11px; opacity:0.5;">+${c.size - 3} more</div>` : '';
+            html += `<tr>
+                <td>${gradeBadge(c.grade)}</td>
+                <td>${c.size}</td>
+                <td>${(c.avg_similarity * 100).toFixed(0)}%</td>
+                <td>${examples}${more}</td>
+            </tr>`;
+        });
+        html += '</tbody></table>';
+        if (clusters.length > 15) {
+            html += `<p style="font-size:12px; color:#6b7280;">+${clusters.length - 15} more clusters</p>`;
+        }
+    }
+
+    const lowRel = data.low_relevance_pages || [];
+    if (lowRel.length > 0) {
+        html += '<h3 style="font-size:15px; margin: 16px 0 4px;">Low Relevance Pages</h3>';
+        html += '<p style="font-size:12px; color:#6b7280; margin: 0 0 8px;">Pages far from the site\'s overall content theme — possibly off-topic or thin.</p>';
+        html += lowRel.slice(0, 10).map(r =>
+            `<div style="font-size:12px; word-break:break-all; opacity:0.8;">${escapeHtml(r.url)} <span style="opacity:0.6;">(relevance ${(r.relevance_score * 100).toFixed(0)}%)</span></div>`).join('');
+        if (lowRel.length > 10) {
+            html += `<p style="font-size:12px; color:#6b7280;">+${lowRel.length - 10} more</p>`;
+        }
+    }
+
+    el.innerHTML = html;
+}
+
+function downloadHtmlReport() {
+    window.open('/api/report/html', '_blank');
 }
 
 // Helper function to escape HTML for safe display
@@ -1783,7 +1980,7 @@ function showUrlDetails(url) {
                                 <ul style="list-style: none; padding: 0; margin: 10px 0;">
                                     ${urlData.linked_from.slice(0, 20).map(sourceUrl => {
                                         const escapedUrl = escapeHtml(sourceUrl);
-                                        return `<li style="padding: 5px 0; word-break: break-all;"><a href="${escapedUrl}" target="_blank" style="color: #8b5cf6; text-decoration: none;">${escapedUrl}</a></li>`;
+                                        return `<li style="padding: 5px 0; word-break: break-all;"><a href="${escapedUrl}" target="_blank" style="color: #116e3d; text-decoration: none;">${escapedUrl}</a></li>`;
                                     }).join('')}
                                     ${urlData.linked_from.length > 20 ? `<li style="padding: 5px 0; font-style: italic; color: #9ca3af;">... and ${urlData.linked_from.length - 20} more</li>` : ''}
                                 </ul>
@@ -1821,111 +2018,6 @@ function closeUrlDetails() {
     }
 }
 
-function displayPageSpeedResults(results) {
-    const container = document.getElementById('pagespeedResults');
-    if (!container || !results || results.length === 0) {
-        return;
-    }
-
-    container.innerHTML = '';
-
-    results.forEach(pageResult => {
-        const pageCard = document.createElement('div');
-        pageCard.className = 'pagespeed-page-card';
-
-        const mobile = pageResult.mobile || {};
-        const desktop = pageResult.desktop || {};
-
-        pageCard.innerHTML = `
-            <div class="pagespeed-page-header">
-                <h4 class="pagespeed-page-url">${pageResult.url}</h4>
-                <span class="pagespeed-analysis-date">Analyzed: ${pageResult.analysis_date}</span>
-            </div>
-
-            <div class="pagespeed-results-grid">
-                <div class="pagespeed-device-result">
-                    <h5>📱 Mobile</h5>
-                    ${mobile.success ? `
-                        <div class="pagespeed-score ${getScoreClass(mobile.performance_score)}">
-                            ${mobile.performance_score || 'N/A'}
-                        </div>
-                        <div class="pagespeed-metrics">
-                            <div class="metric">
-                                <span class="metric-label">FCP:</span>
-                                <span class="metric-value">${mobile.metrics?.first_contentful_paint || 'N/A'}s</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-label">LCP:</span>
-                                <span class="metric-value">${mobile.metrics?.largest_contentful_paint || 'N/A'}s</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-label">CLS:</span>
-                                <span class="metric-value">${mobile.metrics?.cumulative_layout_shift || 'N/A'}</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-label">SI:</span>
-                                <span class="metric-value">${mobile.metrics?.speed_index || 'N/A'}s</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-label">TTI:</span>
-                                <span class="metric-value">${mobile.metrics?.time_to_interactive || 'N/A'}s</span>
-                            </div>
-                        </div>
-                    ` : `
-                        <div class="pagespeed-error">
-                            Error: ${mobile.error || 'Analysis failed'}
-                        </div>
-                    `}
-                </div>
-
-                <div class="pagespeed-device-result">
-                    <h5>🖥️ Desktop</h5>
-                    ${desktop.success ? `
-                        <div class="pagespeed-score ${getScoreClass(desktop.performance_score)}">
-                            ${desktop.performance_score || 'N/A'}
-                        </div>
-                        <div class="pagespeed-metrics">
-                            <div class="metric">
-                                <span class="metric-label">FCP:</span>
-                                <span class="metric-value">${desktop.metrics?.first_contentful_paint || 'N/A'}s</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-label">LCP:</span>
-                                <span class="metric-value">${desktop.metrics?.largest_contentful_paint || 'N/A'}s</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-label">CLS:</span>
-                                <span class="metric-value">${desktop.metrics?.cumulative_layout_shift || 'N/A'}</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-label">SI:</span>
-                                <span class="metric-value">${desktop.metrics?.speed_index || 'N/A'}s</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-label">TTI:</span>
-                                <span class="metric-value">${desktop.metrics?.time_to_interactive || 'N/A'}s</span>
-                            </div>
-                        </div>
-                    ` : `
-                        <div class="pagespeed-error">
-                            Error: ${desktop.error || 'Analysis failed'}
-                        </div>
-                    `}
-                </div>
-            </div>
-        `;
-
-        container.appendChild(pageCard);
-    });
-}
-
-function getScoreClass(score) {
-    if (!score) return 'score-unknown';
-    if (score >= 90) return 'score-good';
-    if (score >= 50) return 'score-needs-improvement';
-    return 'score-poor';
-}
-
 // Save/Load Crawl Functions
 async function saveCrawl() {
     try {
@@ -1948,7 +2040,7 @@ async function saveCrawl() {
                 urls = crawlData.urls;
                 links = crawlData.links || links;
                 issues = crawlData.issues || issues;
-                // Update stats to include latest PageSpeed results if available
+                // Keep latest stats
                 if (crawlData.stats) {
                     stats = crawlData.stats;
                 }
@@ -1978,7 +2070,7 @@ async function saveCrawl() {
         // Generate filename with domain and timestamp
         const domain = crawlState.baseUrl ? new URL(crawlState.baseUrl).hostname : 'crawl';
         const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
-        a.download = `librecrawl_${domain}_${timestamp}.json`;
+        a.download = `crawlyx_${domain}_${timestamp}.json`;
 
         document.body.appendChild(a);
         a.click();
@@ -2027,6 +2119,9 @@ function loadCrawl() {
 
             // Update UI
             document.getElementById('urlInput').value = saveData.baseUrl || '';
+            if (typeof refreshDomainRating === 'function') {
+                refreshDomainRating(saveData.baseUrl || '');
+            }
             updateStatsDisplay();
 
             // Populate tables with loaded data
@@ -2119,12 +2214,6 @@ function loadCrawl() {
             updateStatusCodesTable();
             updateCrawlButtons();
 
-            // Display PageSpeed results if available
-            if (saveData.stats && saveData.stats.pagespeed_results) {
-                console.log(`Loading ${saveData.stats.pagespeed_results.length} PageSpeed results...`);
-                displayPageSpeedResults(saveData.stats.pagespeed_results);
-            }
-
             // Force refresh of all tables
             setTimeout(() => {
                 console.log('Force refreshing tables...');
@@ -2140,8 +2229,8 @@ function loadCrawl() {
             }
 
             // Notify plugins of loaded data
-            if (window.LibreCrawlPlugin && window.LibreCrawlPlugin.loader) {
-                window.LibreCrawlPlugin.loader.notifyDataUpdate({
+            if (window.CrawlyxPlugin && window.CrawlyxPlugin.loader) {
+                window.CrawlyxPlugin.loader.notifyDataUpdate({
                     urls: crawlState.urls,
                     links: crawlState.links,
                     issues: crawlState.issues,

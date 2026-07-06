@@ -1,17 +1,17 @@
-# LibreCrawl Plugins
+# Crawlyx Plugins
 
-Drop your custom plugin files here! Each `.js` file will automatically create a new tab in LibreCrawl.
+Drop your custom plugin files here! Each `.js` file will automatically create a new tab in Crawlyx.
 
 ## 🔌 Quick Start
 
 1. Create a new `.js` file in this folder (e.g., `my-plugin.js`)
-2. Register your plugin using the LibreCrawl Plugin API
+2. Register your plugin using the Crawlyx Plugin API
 3. Refresh the app - your new tab appears automatically!
 
 ## 📝 Example Plugin Structure
 
 ```javascript
-LibreCrawlPlugin.register({
+CrawlyxPlugin.register({
   // Required: Unique ID (used for tab identification)
   id: 'my-plugin',
 
@@ -93,7 +93,7 @@ this.utils.escapeHtml(text)
 
 ## 🎨 Styling
 
-Use these CSS classes to match LibreCrawl's design:
+Use these CSS classes to match Crawlyx's design:
 
 - `.plugin-content` - Main container
 - `.plugin-header` - Header section

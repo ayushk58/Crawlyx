@@ -20,7 +20,6 @@ class IncrementalPoller {
         this.latestStats = null;
         this.latestStatus = null;
         this.latestProgress = 0;
-        this.isRunningPagespeed = false;
         this.memory = null;
         this.memoryData = null;
     }
@@ -38,7 +37,6 @@ class IncrementalPoller {
         this.latestStats = null;
         this.latestStatus = null;
         this.latestProgress = 0;
-        this.isRunningPagespeed = false;
         this.memory = null;
         this.memoryData = null;
     }
@@ -63,7 +61,6 @@ class IncrementalPoller {
             this.latestStats = data.stats || this.latestStats;
             this.latestStatus = data.status || this.latestStatus;
             this.latestProgress = data.progress || 0;
-            this.isRunningPagespeed = data.is_running_pagespeed || false;
             this.memory = data.memory || this.memory;
             this.memoryData = data.memory_data || this.memoryData;
 
@@ -91,7 +88,6 @@ class IncrementalPoller {
                 links: this.allLinks,
                 issues: this.allIssues,
                 progress: this.latestProgress,
-                is_running_pagespeed: this.isRunningPagespeed,
                 memory: this.memory,
                 memory_data: this.memoryData
             };
@@ -114,7 +110,6 @@ class IncrementalPoller {
             links: this.allLinks,
             issues: this.allIssues,
             progress: this.latestProgress,
-            is_running_pagespeed: this.isRunningPagespeed,
             memory: this.memory,
             memory_data: this.memoryData
         };

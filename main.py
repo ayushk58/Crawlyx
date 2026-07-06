@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Parse command line arguments
-parser = argparse.ArgumentParser(description='LibreCrawl - SEO Spider Tool')
+parser = argparse.ArgumentParser(description='Crawlyx - Site Crawler & SEO Auditor')
 parser.add_argument('--local', '-l', action='store_true',
                     help='Run in local mode (all users get admin tier, no rate limits)')
 parser.add_argument('--disable-register', '-dr', action='store_true',
@@ -312,6 +312,44 @@ def start_cleanup_thread():
     cleanup_thread.start()
     print("Started crawler instance cleanup thread")
 
+def format_url_row(url_data, fields):
+    """Flatten a crawl result into a dict of export-friendly values"""
+    row = {}
+    for field in fields:
+        value = url_data.get(field, '')
+
+        # Handle complex data types
+        if field == 'analytics' and isinstance(value, dict):
+            analytics_list = []
+            if value.get('gtag') or value.get('ga4_id'): analytics_list.append('GA4')
+            if value.get('google_analytics'): analytics_list.append('GA')
+            if value.get('gtm_id'): analytics_list.append('GTM')
+            if value.get('facebook_pixel'): analytics_list.append('FB')
+            if value.get('hotjar'): analytics_list.append('HJ')
+            if value.get('mixpanel'): analytics_list.append('MP')
+            row[field] = ', '.join(analytics_list)
+        elif field == 'og_tags' and isinstance(value, dict):
+            row[field] = f"{len(value)} tags" if value else ''
+        elif field == 'twitter_tags' and isinstance(value, dict):
+            row[field] = f"{len(value)} tags" if value else ''
+        elif field == 'json_ld' and isinstance(value, list):
+            row[field] = f"{len(value)} scripts" if value else ''
+        elif field == 'images' and isinstance(value, list):
+            row[field] = f"{len(value)} images" if value else ''
+        elif field == 'internal_links' and isinstance(value, (int, float)):
+            row[field] = f"{int(value)} internal links" if value else '0 internal links'
+        elif field == 'external_links' and isinstance(value, (int, float)):
+            row[field] = f"{int(value)} external links" if value else '0 external links'
+        elif field == 'h2' and isinstance(value, list):
+            row[field] = ', '.join(value[:3]) + ('...' if len(value) > 3 else '')
+        elif field == 'h3' and isinstance(value, list):
+            row[field] = ', '.join(value[:3]) + ('...' if len(value) > 3 else '')
+        elif isinstance(value, (dict, list)):
+            row[field] = str(value)
+        else:
+            row[field] = value
+    return row
+
 def generate_csv_export(urls, fields):
     """Generate CSV export content"""
     output = StringIO()
@@ -319,44 +357,50 @@ def generate_csv_export(urls, fields):
     writer.writeheader()
 
     for url_data in urls:
-        row = {}
-        for field in fields:
-            value = url_data.get(field, '')
-
-            # Handle complex data types for CSV
-            if field == 'analytics' and isinstance(value, dict):
-                analytics_list = []
-                if value.get('gtag') or value.get('ga4_id'): analytics_list.append('GA4')
-                if value.get('google_analytics'): analytics_list.append('GA')
-                if value.get('gtm_id'): analytics_list.append('GTM')
-                if value.get('facebook_pixel'): analytics_list.append('FB')
-                if value.get('hotjar'): analytics_list.append('HJ')
-                if value.get('mixpanel'): analytics_list.append('MP')
-                row[field] = ', '.join(analytics_list)
-            elif field == 'og_tags' and isinstance(value, dict):
-                row[field] = f"{len(value)} tags" if value else ''
-            elif field == 'twitter_tags' and isinstance(value, dict):
-                row[field] = f"{len(value)} tags" if value else ''
-            elif field == 'json_ld' and isinstance(value, list):
-                row[field] = f"{len(value)} scripts" if value else ''
-            elif field == 'images' and isinstance(value, list):
-                row[field] = f"{len(value)} images" if value else ''
-            elif field == 'internal_links' and isinstance(value, (int, float)):
-                row[field] = f"{int(value)} internal links" if value else '0 internal links'
-            elif field == 'external_links' and isinstance(value, (int, float)):
-                row[field] = f"{int(value)} external links" if value else '0 external links'
-            elif field == 'h2' and isinstance(value, list):
-                row[field] = ', '.join(value[:3]) + ('...' if len(value) > 3 else '')
-            elif field == 'h3' and isinstance(value, list):
-                row[field] = ', '.join(value[:3]) + ('...' if len(value) > 3 else '')
-            elif isinstance(value, (dict, list)):
-                row[field] = str(value)
-            else:
-                row[field] = value
-
-        writer.writerow(row)
+        writer.writerow(format_url_row(url_data, fields))
 
     return output.getvalue()
+
+def generate_xlsx_export(urls, fields, issues=None, links=None):
+    """Generate XLSX export as a single workbook (base64-encoded).
+
+    Sheets: URLs (if fields given), Issues and Links (if provided).
+    Raises ImportError if openpyxl is not installed.
+    """
+    import base64
+    from io import BytesIO
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    def add_sheet(title, headers, rows):
+        ws = wb.create_sheet(title=title)
+        ws.append(headers)
+        for row in rows:
+            ws.append([row.get(h, '') for h in headers])
+        ws.freeze_panes = 'A2'
+
+    if fields and urls:
+        add_sheet('URLs', fields, (format_url_row(u, fields) for u in urls))
+
+    if issues:
+        issue_headers = ['url', 'type', 'category', 'issue', 'details']
+        add_sheet('Issues', issue_headers, issues)
+
+    if links:
+        link_headers = ['source_url', 'target_url', 'anchor_text', 'is_internal',
+                        'target_domain', 'target_status', 'placement']
+        rows = ({**l, 'is_internal': 'Yes' if l.get('is_internal') else 'No',
+                 'target_status': l.get('target_status', 'Not crawled')} for l in links)
+        add_sheet('Links', link_headers, rows)
+
+    if not wb.sheetnames:
+        wb.create_sheet(title='Empty')
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    return base64.b64encode(buffer.getvalue()).decode('ascii')
 
 def generate_json_export(urls, fields):
     """Generate JSON export content"""
@@ -378,7 +422,7 @@ def generate_json_export(urls, fields):
 
 def generate_xml_export(urls, fields):
     """Generate XML export content"""
-    root = ET.Element('librecrawl_export')
+    root = ET.Element('crawlyx_export')
     root.set('export_date', time.strftime('%Y-%m-%d %H:%M:%S'))
     root.set('total_urls', str(len(urls)))
 
@@ -1281,6 +1325,130 @@ def crawl_stats():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
+def _get_analysis_inputs():
+    """Current crawl data (urls, links, issues, diagnostics) for analysis endpoints"""
+    crawler = get_or_create_crawler()
+    data = crawler.get_status()
+    return (data.get('urls', []), data.get('links', []),
+            data.get('issues', []), data.get('diagnostics', {}))
+
+@app.route('/api/domain-rating')
+@login_required
+def domain_rating():
+    """Ahrefs public Domain Rating for the crawl target domain."""
+    from src.domain_rating import fetch_domain_rating
+    target = request.args.get('target', '').strip()
+    if not target:
+        return jsonify({'success': False, 'error': 'Missing target parameter'})
+    result = fetch_domain_rating(target)
+    return jsonify(result)
+
+@app.route('/api/analysis/summary')
+@login_required
+def analysis_summary():
+    """Executive summary: prioritized issue groups, link intelligence, clusters"""
+    from src.analysis.crawl_summarizer import summarize_crawl
+    try:
+        urls, links, issues, diagnostics = _get_analysis_inputs()
+        if not urls:
+            return jsonify({'success': False, 'error': 'No crawl data to analyze'})
+        summary = summarize_crawl(urls, links, issues, diagnostics)
+        return jsonify({'success': True, 'summary': summary})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/analysis/link_graph')
+@login_required
+def analysis_link_graph():
+    """Per-page link metrics and link reports"""
+    from src.analysis.link_graph_analyzer import analyze_link_graph
+    try:
+        urls, links, _, _ = _get_analysis_inputs()
+        if not urls:
+            return jsonify({'success': False, 'error': 'No crawl data to analyze'})
+        result = analyze_link_graph(urls, links)
+        return jsonify({'success': True, **result})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/analysis/content_similarity')
+@login_required
+def analysis_content_similarity():
+    """Similar-content clusters (graded A-F) and low-relevance pages"""
+    from src.analysis.content_similarity import analyze_content_similarity
+    try:
+        urls, _, _, _ = _get_analysis_inputs()
+        if not urls:
+            return jsonify({'success': False, 'error': 'No crawl data to analyze'})
+        result = analyze_content_similarity(urls)
+        return jsonify({'success': True, **result})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/report/html')
+@login_required
+def report_html():
+    """Standalone HTML audit report for the current crawl"""
+    from src.analysis.crawl_summarizer import summarize_crawl
+    from src.analysis.report_builder import build_html_report
+    try:
+        urls, links, issues, diagnostics = _get_analysis_inputs()
+        if not urls:
+            return jsonify({'success': False, 'error': 'No crawl data to report on'})
+        crawler = get_or_create_crawler()
+        summary = summarize_crawl(urls, links, issues, diagnostics)
+        report = build_html_report(summary, site_url=crawler.base_url or '')
+        return app.response_class(
+            report, mimetype='text/html',
+            headers={'Content-Disposition':
+                     f'attachment; filename=crawlyx_report_{int(time.time())}.html'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/visualization/graph')
+@login_required
+def visualization_graph():
+    """Authority-flow graph at three zoom levels.
+
+    Query params:
+        mode: crawltree (default) | authority
+        focus: URL to re-root the tree at
+    """
+    from src.analysis.graph_builder import build_graph
+    try:
+        urls, links, _, _ = _get_analysis_inputs()
+        if not urls:
+            return jsonify({'success': False, 'error': 'No crawl data to visualize'})
+
+        mode = request.args.get('mode', 'crawltree')
+        if mode not in ('crawltree', 'authority'):
+            return jsonify({'success': False, 'error': f'Invalid mode: {mode}'})
+        focus = request.args.get('focus')
+
+        result = build_graph(urls, links, mode=mode, focus=focus)
+        return jsonify({'success': True, **result})
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/plugins/list')
+@login_required
+def list_plugins():
+    """Auto-discover plugin files in web/static/plugins/.
+
+    Files starting with '_' are treated as disabled (matches the plugins README).
+    """
+    plugins_dir = os.path.join(app.static_folder, 'plugins')
+    plugins = []
+    try:
+        for filename in sorted(os.listdir(plugins_dir)):
+            if filename.endswith('.js') and not filename.startswith('_'):
+                plugins.append(filename)
+    except OSError:
+        pass
+    return jsonify({'success': True, 'plugins': plugins})
+
 @app.route('/api/export_data', methods=['POST'])
 @login_required
 def export_data():
@@ -1333,6 +1501,25 @@ def export_data():
         # Remove special fields from regular export fields
         regular_fields = [f for f in export_fields if f not in ['issues_detected', 'links_detailed']]
 
+        # XLSX: single workbook with URLs/Issues/Links sheets
+        if export_format == 'xlsx':
+            try:
+                content_b64 = generate_xlsx_export(
+                    urls, regular_fields,
+                    issues=issues if has_issues_export else None,
+                    links=links if has_links_export else None
+                )
+            except ImportError:
+                return jsonify({'success': False,
+                                'error': 'XLSX export requires the openpyxl package (pip install openpyxl)'})
+            return jsonify({
+                'success': True,
+                'content': content_b64,
+                'encoding': 'base64',
+                'mimetype': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'filename': f'crawlyx_export_{int(time.time())}.xlsx'
+            })
+
         # Debug logging
         print(f"DEBUG: export_fields = {export_fields}")
         print(f"DEBUG: has_issues_export = {has_issues_export}")
@@ -1347,15 +1534,15 @@ def export_data():
             if export_format == 'csv':
                 issues_content = generate_issues_csv_export(issues)
                 issues_mimetype = 'text/csv'
-                issues_filename = f'librecrawl_issues_{int(time.time())}.csv'
+                issues_filename = f'crawlyx_issues_{int(time.time())}.csv'
             elif export_format == 'json':
                 issues_content = generate_issues_json_export(issues)
                 issues_mimetype = 'application/json'
-                issues_filename = f'librecrawl_issues_{int(time.time())}.json'
+                issues_filename = f'crawlyx_issues_{int(time.time())}.json'
             else:
                 issues_content = generate_issues_csv_export(issues)
                 issues_mimetype = 'text/csv'
-                issues_filename = f'librecrawl_issues_{int(time.time())}.csv'
+                issues_filename = f'crawlyx_issues_{int(time.time())}.csv'
 
             files_to_export.append({
                 'content': issues_content,
@@ -1368,15 +1555,15 @@ def export_data():
             if export_format == 'csv':
                 links_content = generate_links_csv_export(links)
                 links_mimetype = 'text/csv'
-                links_filename = f'librecrawl_links_{int(time.time())}.csv'
+                links_filename = f'crawlyx_links_{int(time.time())}.csv'
             elif export_format == 'json':
                 links_content = generate_links_json_export(links)
                 links_mimetype = 'application/json'
-                links_filename = f'librecrawl_links_{int(time.time())}.json'
+                links_filename = f'crawlyx_links_{int(time.time())}.json'
             else:
                 links_content = generate_links_csv_export(links)
                 links_mimetype = 'text/csv'
-                links_filename = f'librecrawl_links_{int(time.time())}.csv'
+                links_filename = f'crawlyx_links_{int(time.time())}.csv'
 
             files_to_export.append({
                 'content': links_content,
@@ -1389,15 +1576,15 @@ def export_data():
             if export_format == 'csv':
                 regular_content = generate_csv_export(urls, regular_fields)
                 regular_mimetype = 'text/csv'
-                regular_filename = f'librecrawl_export_{int(time.time())}.csv'
+                regular_filename = f'crawlyx_export_{int(time.time())}.csv'
             elif export_format == 'json':
                 regular_content = generate_json_export(urls, regular_fields)
                 regular_mimetype = 'application/json'
-                regular_filename = f'librecrawl_export_{int(time.time())}.json'
+                regular_filename = f'crawlyx_export_{int(time.time())}.json'
             elif export_format == 'xml':
                 regular_content = generate_xml_export(urls, regular_fields)
                 regular_mimetype = 'application/xml'
-                regular_filename = f'librecrawl_export_{int(time.time())}.xml'
+                regular_filename = f'crawlyx_export_{int(time.time())}.xml'
             else:
                 return jsonify({'success': False, 'error': 'Unsupported export format'})
 
@@ -1499,11 +1686,15 @@ def main():
     start_cleanup_thread()
 
     print("=" * 60)
-    print("LibreCrawl - SEO Spider")
+    print("Crawlyx - Site Crawler & SEO Auditor")
     print("=" * 60)
-    print(f"\n🚀 Server starting on http://0.0.0.0:5000")
-    print(f"🌐 Access from browser: http://localhost:5000")
-    print(f"📱 Access from network: http://<your-ip>:5000")
+    host = os.getenv('HOST', '0.0.0.0')
+    port = int(os.getenv('PORT', '5000'))
+    browser_url = f"http://localhost:{port}"
+
+    print(f"\n🚀 Server starting on http://{host}:{port}")
+    print(f"🌐 Access from browser: {browser_url}")
+    print(f"📱 Access from network: http://<your-ip>:{port}")
     print(f"\n✨ Multi-tenancy enabled - each browser session is isolated")
     print(f"💾 Settings stored in browser localStorage")
     print(f"\nPress Ctrl+C to stop the server\n")
@@ -1512,16 +1703,16 @@ def main():
     # Open browser in a separate thread after short delay
     def open_browser():
         time.sleep(1.5)  # Wait for Flask to start
-        webbrowser.open('http://localhost:5000')
+        webbrowser.open(browser_url)
 
     browser_thread = threading.Thread(target=open_browser, daemon=True)
     browser_thread.start()
 
     # Run Flask server with Waitress (production-grade WSGI server)
     from waitress import serve
-    print("Starting LibreCrawl on http://localhost:5000")
+    print(f"Starting Crawlyx on {browser_url}")
     print("Using Waitress WSGI server with multi-threading support")
-    serve(app, host='0.0.0.0', port=5000, threads=8)
+    serve(app, host=host, port=port, threads=8)
 
 if __name__ == '__main__':
     main()

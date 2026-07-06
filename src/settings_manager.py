@@ -39,7 +39,7 @@ class SettingsManager:
         extra_settings = user_settings + [
             # Requests tab
             'userAgent', 'timeout', 'retries', 'acceptLanguage', 'respectRobotsTxt', 'allowCookies',
-            'discoverSitemaps', 'enablePageSpeed', 'googleApiKey',
+            'discoverSitemaps',
             # Filters tab
             'includeExtensions', 'excludeExtensions', 'includePatterns', 'excludePatterns', 'maxFileSize',
             # JavaScript tab
@@ -80,15 +80,13 @@ class SettingsManager:
             'crawlExternalLinks': False,
 
             # Request settings
-            'userAgent': 'LibreCrawl/1.0 (Web Crawler)',
+            'userAgent': 'Crawlyx/1.0 (Web Crawler)',
             'timeout': 10,
             'retries': 3,
             'acceptLanguage': 'en-US,en;q=0.9',
             'respectRobotsTxt': True,
             'allowCookies': True,
             'discoverSitemaps': True,
-            'enablePageSpeed': False,
-            'googleApiKey': '',
 
             # Filter settings
             'includeExtensions': 'html,htm,php,asp,aspx,jsp',
@@ -120,7 +118,7 @@ class SettingsManager:
             'jsTimeout': 30,
             'jsBrowser': 'chromium',
             'jsHeadless': True,
-            'jsUserAgent': 'LibreCrawl/1.0 (Web Crawler with JavaScript)',
+            'jsUserAgent': 'Crawlyx/1.0 (Web Crawler with JavaScript)',
             'jsViewportWidth': 1920,
             'jsViewportHeight': 1080,
             'jsMaxConcurrentPages': 3,
@@ -498,8 +496,6 @@ class SettingsManager:
             'proxy_url': settings['proxyUrl'] if settings['enableProxy'] else None,
             'custom_headers': self._parse_custom_headers(settings['customHeaders']),
             'discover_sitemaps': settings['discoverSitemaps'],
-            'enable_pagespeed': settings['enablePageSpeed'],
-            'google_api_key': settings['googleApiKey'],
             'enable_javascript': settings['enableJavaScript'],
             'js_wait_time': settings['jsWaitTime'],
             'js_timeout': settings['jsTimeout'],
