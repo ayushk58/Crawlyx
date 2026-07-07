@@ -1,25 +1,25 @@
 #!/bin/bash
 
-# Start LibreCrawl - tries Docker first, falls back to Python
+# Start Crawlyx - tries Docker first, falls back to Python
 
 echo "Checking for Docker..."
 if command -v docker &> /dev/null && command -v docker compose &> /dev/null; then
-    echo "Docker found! Starting LibreCrawl with Docker..."
+    echo "Docker found! Starting Crawlyx with Docker..."
     docker compose up -d
 
     # Wait for the service to be ready
-    echo "Waiting for LibreCrawl to start..."
+    echo "Waiting for Crawlyx to start..."
     sleep 3
 
     # Check if container is running
-    if docker ps | grep -q librecrawl; then
+    if docker ps | grep -q crawlyx; then
         echo ""
         echo "================================================================================"
-        echo "LibreCrawl is running!"
+        echo "Crawlyx is running!"
         echo "Opening browser to http://localhost:5000"
         echo ""
-        echo "Press Ctrl+C to stop LibreCrawl and exit"
-        echo "DO NOT close this terminal or LibreCrawl will keep running in the background!"
+        echo "Press Ctrl+C to stop Crawlyx and exit"
+        echo "DO NOT close this terminal or Crawlyx will keep running in the background!"
         echo "================================================================================"
         echo ""
 
@@ -33,14 +33,14 @@ if command -v docker &> /dev/null && command -v docker compose &> /dev/null; the
         fi
 
         # Trap Ctrl+C to gracefully shutdown
-        trap 'echo ""; echo "Stopping LibreCrawl..."; docker compose down; exit 0' INT
+        trap 'echo ""; echo "Stopping Crawlyx..."; docker compose down; exit 0' INT
 
         # Keep terminal open and show logs
         echo "Showing live logs (press Ctrl+C to stop):"
         echo ""
         docker compose logs -f
     else
-        echo "Error: LibreCrawl container failed to start"
+        echo "Error: Crawlyx container failed to start"
         docker compose logs
         exit 1
     fi
@@ -80,7 +80,6 @@ else
         playwright install chromium
     fi
 
-    # Run LibreCrawl with Python in local mode
     echo "Starting Crawlyx..."
     echo "Opening browser to http://localhost:5000"
 

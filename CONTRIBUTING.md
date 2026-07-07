@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for considering contributing to LibreCrawl. Here's how you can help.
+Thanks for considering contributing to Crawlyx. Here's how you can help.
 
 ## Ways to contribute
 

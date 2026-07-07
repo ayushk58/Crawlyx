@@ -1,6 +1,6 @@
 # Crawlyx — Current Capabilities
 
-Crawlyx is a web-based site crawler and SEO auditor (fork of LibreCrawl). This document describes what the product **does today**, based on the shipped codebase.
+Crawlyx is a web-based site crawler and SEO auditor. This document describes what the product **does today**, based on the shipped codebase.
 
 ---
 

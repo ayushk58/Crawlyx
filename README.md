@@ -2,8 +2,6 @@
 
 A free, open-source website crawler and technical SEO auditor. Runs locally in your browser — no accounts, no rate limits, no license fees.
 
-Crawlyx is a fork of [LibreCrawl](https://github.com/PhialsBasement/LibreCrawl) (MIT).
-
 ## What it does
 
 Crawlyx crawls websites and gives you detailed information about pages, links, SEO elements, and performance — a self-hosted alternative to Screaming Frog, Sitebulb, and similar tools.
@@ -26,13 +24,13 @@ Crawlyx crawls websites and gives you detailed information about pages, links, S
 
 **Windows:**
 ```batch
-start-librecrawl.bat
+start-crawlyx.bat
 ```
 
 **Linux/Mac:**
 ```bash
-chmod +x start-librecrawl.sh
-./start-librecrawl.sh
+chmod +x start-crawlyx.sh
+./start-crawlyx.sh
 ```
 
 Installs dependencies, starts the server, and opens `http://localhost:5000`.
@@ -89,4 +87,4 @@ See [CAPABILITIES.md](CAPABILITIES.md) for a complete description of what Crawly
 
 ## License
 
-MIT License - see LICENSE file for details. Original work © 2025 Phiality (LibreCrawl).
+MIT License — see [LICENSE](LICENSE) for details.
