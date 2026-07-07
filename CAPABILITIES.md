@@ -8,10 +8,10 @@ Crawlyx is a web-based site crawler and SEO auditor (fork of LibreCrawl). This d
 
 | Area | Summary |
 |------|---------|
-| **Product type** | Multi-tenant web app (Flask + browser UI) |
+| **Product type** | Local web app (Flask + browser UI) |
 | **Crawl engine** | Concurrent HTTP crawler with optional JavaScript rendering (Playwright) |
 | **Primary use** | Technical SEO audits, link analysis, issue detection, export |
-| **Run locally** | `PORT=5050 .venv/bin/python main.py --local` → `http://localhost:5050` |
+| **Run locally** | `PORT=5050 .venv/bin/python main.py` → `http://localhost:5050` |
 
 ---
 
@@ -58,7 +58,7 @@ Crawlyx is a web-based site crawler and SEO auditor (fork of LibreCrawl). This d
 
 - Start, **stop**, **pause**, and **resume** crawls
 - Real-time progress bar and live statistics
-- Per-session isolated crawler instances (multi-tenancy)
+- Per-browser-session isolated crawler instances
 
 ---
 
@@ -307,41 +307,19 @@ Click any URL to inspect full extracted metadata (title, meta, headings, robots,
 
 ---
 
-## Persistence & accounts
+## Persistence
 
 ### Crawl history (database)
 
-- Save crawls to server-side storage (authenticated users)
+- Save crawls to local SQLite storage
 - List, load, resume, archive, and delete saved crawls
 - Dashboard for crawl history and stats
 
-### Authentication
+### Sessions
 
-- Register, login, logout, email verification
-- Guest login with rate limits (standard mode)
-- **Local mode** (`--local`) — auto-admin, no rate limits, no auth required
-
-### Multi-tenancy
-
-- Isolated crawler sessions per browser
-- Settings stored in **browser localStorage** (per browser)
+- Isolated crawler sessions per browser (no accounts, no login)
+- Settings stored in **browser localStorage** (per browser) and SQLite
 - Session expiry after inactivity
-- Tier-based access in production mode (Guest, User, Extra, Admin)
-
----
-
-## Plugin system
-
-Drop `.js` files in `web/static/plugins/` to add custom analysis tabs.
-
-Plugins receive live crawl data:
-
-- `urls` — all crawled pages with metadata
-- `links` — all discovered links
-- `issues` — detected issues
-- `stats` — crawl statistics
-
-Hooks: `onLoad`, `onTabActivate`, `onTabDeactivate`, `onDataUpdate`, `onCrawlComplete`
 
 ---
 

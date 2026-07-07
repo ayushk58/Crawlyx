@@ -44,12 +44,6 @@ document.addEventListener('DOMContentLoaded', async function() {
 });
 
 async function initializeApp() {
-    // Load plugins first (before tabs are initialized)
-    if (window.CrawlyxPlugin && window.CrawlyxPlugin.loader) {
-        await window.CrawlyxPlugin.loader.loadAllPlugins();
-        window.CrawlyxPlugin.loader.initializePlugins();
-    }
-
     // Setup event listeners
     setupEventListeners();
     if (typeof initDomainRating === 'function') {
@@ -58,9 +52,6 @@ async function initializeApp() {
 
     // Initialize tables
     initializeTables();
-
-    // Load user info
-    loadUserInfo();
 
     // DEBUG: Check sessionStorage
     console.log('DEBUG: Checking sessionStorage force_ui_refresh:', sessionStorage.getItem('force_ui_refresh'));
@@ -323,16 +314,6 @@ function clearCrawlData() {
         window.clearVisualization();
     }
 
-    // Notify plugins of data clear (send empty data)
-    if (window.CrawlyxPlugin && window.CrawlyxPlugin.loader) {
-        window.CrawlyxPlugin.loader.notifyDataUpdate({
-            urls: [],
-            links: [],
-            issues: [],
-            stats: { discovered: 0, crawled: 0, depth: 0, speed: 0 }
-        });
-    }
-
     // Clear filter states
     document.querySelectorAll('.filter-item').forEach(item => {
         item.classList.remove('active');
@@ -367,8 +348,6 @@ function startPythonCrawl(url) {
     .then(data => {
         if (data.success) {
             updateStatus('Crawling in progress...');
-            // Refresh user info to update crawl count
-            loadUserInfo();
             // Start polling for updates
             pollCrawlProgress();
         } else {
@@ -434,15 +413,6 @@ function pollCrawlProgress() {
                 // Update visualization one final time when crawl completes
                 if (typeof loadVisualizationData === 'function') {
                     loadVisualizationData();
-                }
-                // Notify plugins that crawl is complete
-                if (window.CrawlyxPlugin && window.CrawlyxPlugin.loader) {
-                    window.CrawlyxPlugin.loader.notifyCrawlComplete({
-                        urls: crawlState.urls,
-                        links: crawlState.links,
-                        issues: crawlState.issues,
-                        stats: crawlState.stats
-                    });
                 }
             }
         })
@@ -557,15 +527,6 @@ function updateCrawlTables(data) {
     updateProgress(data.progress || 0);
     updateProgressText(data);
 
-    // Notify plugins of data update
-    if (window.CrawlyxPlugin && window.CrawlyxPlugin.loader) {
-        window.CrawlyxPlugin.loader.notifyDataUpdate({
-            urls: crawlState.urls,
-            links: crawlState.links,
-            issues: crawlState.issues,
-            stats: crawlState.stats
-        });
-    }
 }
 
 function updateProgressText(data) {
@@ -1131,33 +1092,6 @@ function switchTab(tabName) {
         }, 100);
     }
 
-    // Handle plugin tabs
-    const pluginTab = document.getElementById(`${tabName}-tab`);
-    if (pluginTab && pluginTab.classList.contains('plugin-tab')) {
-        handlePluginTabSwitch(tabName);
-    }
-}
-
-// Handle plugin tab activation
-function handlePluginTabSwitch(tabName) {
-    if (!window.CrawlyxPlugin || !window.CrawlyxPlugin.loader) {
-        return;
-    }
-
-    const loader = window.CrawlyxPlugin.loader;
-
-    // Deactivate previously active plugin
-    if (loader.activePluginId && loader.activePluginId !== tabName) {
-        loader.deactivatePlugin(loader.activePluginId);
-    }
-
-    // Activate the new plugin
-    loader.activatePlugin(tabName, {
-        urls: crawlState.urls,
-        links: crawlState.links,
-        issues: crawlState.issues,
-        stats: crawlState.stats
-    });
 }
 
 // Issue Filtering
@@ -1516,57 +1450,6 @@ function isValidUrl(string) {
 }
 
 // This is defined in settings.js - no need to redefine here
-
-async function logout() {
-    try {
-        const response = await fetch('/api/logout', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            }
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-            // Redirect to login page
-            window.location.href = '/login';
-        } else {
-            console.error('Logout failed:', data.message);
-            // Still redirect even if logout fails
-            window.location.href = '/login';
-        }
-    } catch (error) {
-        console.error('Logout error:', error);
-        // Redirect anyway
-        window.location.href = '/login';
-    }
-}
-
-async function loadUserInfo() {
-    try {
-        const response = await fetch('/api/user/info');
-        const data = await response.json();
-
-        if (data.success && data.user) {
-            const user = data.user;
-            const userInfoElement = document.getElementById('userInfo');
-
-            if (user.tier === 'guest') {
-                // Show crawls remaining for guests
-                const remaining = user.crawls_remaining;
-                userInfoElement.textContent = `Guest (${remaining}/3 crawls remaining)`;
-                userInfoElement.style.color = remaining === 0 ? '#dc2626' : '#6b7280';
-            } else {
-                // Show username and tier for registered users
-                userInfoElement.textContent = `${user.username} (${user.tier})`;
-                userInfoElement.style.color = '#6b7280';
-            }
-        }
-    } catch (error) {
-        console.error('Error loading user info:', error);
-    }
-}
 
 async function exportData() {
     try {
@@ -2226,16 +2109,6 @@ function loadCrawl() {
             // Update visualization if it exists and has been initialized
             if (typeof window.updateVisualizationFromLoadedData === 'function') {
                 window.updateVisualizationFromLoadedData(saveData.urls, saveData.links);
-            }
-
-            // Notify plugins of loaded data
-            if (window.CrawlyxPlugin && window.CrawlyxPlugin.loader) {
-                window.CrawlyxPlugin.loader.notifyDataUpdate({
-                    urls: crawlState.urls,
-                    links: crawlState.links,
-                    issues: crawlState.issues,
-                    stats: crawlState.stats
-                });
             }
 
             showNotification(`Crawl loaded: ${saveData.stats.crawled} URLs from ${new Date(saveData.timestamp).toLocaleDateString()}`, 'success');

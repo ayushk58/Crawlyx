@@ -9,9 +9,9 @@ import time
 from datetime import datetime
 from contextlib import contextmanager
 
-# Database file location (same as auth database) - stored in data/ for Docker volume persistence
+# Database file location (same as settings database) - stored in data/ for Docker volume persistence
 import os
-DB_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'users.db')
+DB_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'crawlyx.db')
 
 @contextmanager
 def get_db():
@@ -56,9 +56,7 @@ def init_crawl_tables():
                 estimated_size_mb REAL,
 
                 can_resume BOOLEAN DEFAULT 1,
-                resume_checkpoint TEXT,
-
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                resume_checkpoint TEXT
             )
         ''')
 

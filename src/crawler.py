@@ -102,9 +102,6 @@ class WebCrawler:
         self.memory_monitor = MemoryMonitor()
         self.user_memory = UserMemoryTracker()
 
-        # Demo mode state
-        self._demo_limit_reached = False
-
         # Results storage
         self.crawl_results = []
         self.results_lock = threading.Lock()
@@ -398,7 +395,6 @@ class WebCrawler:
         # Start memory monitoring
         self.memory_monitor.start_monitoring()
         self.user_memory.reset()
-        self._demo_limit_reached = False
         self.diagnostics = self._empty_diagnostics()
 
     def _discover_and_add_sitemap_urls(self, base_url):
@@ -488,21 +484,11 @@ class WebCrawler:
             if crawl_data['status'] not in ['paused', 'failed', 'running', 'stopped']:
                 return False, f"Cannot resume crawl with status: {crawl_data['status']}"
 
-            # Verify user owns this crawl (if not guest)
-            if user_id and crawl_data.get('user_id') != user_id:
-                return False, "Unauthorized - you don't own this crawl"
-
             # Restore basic state
             self.crawl_id = crawl_id
             self.base_url = crawl_data['base_url']
             self.base_domain = crawl_data['base_domain']
-            # Preserve demo keys across config restore
-            demo_mode = self.config.get('demo_mode', False)
-            demo_limit = self.config.get('demo_memory_limit_bytes', 0)
             self.config = crawl_data.get('config_snapshot', self._get_default_config())
-            if demo_mode:
-                self.config['demo_mode'] = True
-                self.config['demo_memory_limit_bytes'] = demo_limit
             self.db_save_enabled = True
 
             # Initialize components
@@ -538,7 +524,6 @@ class WebCrawler:
 
             # Account for loaded data in per-user memory tracker
             self.user_memory.reset()
-            self._demo_limit_reached = False
             for url_data in self.crawl_results:
                 self.user_memory.track_url(url_data)
             if loaded_links:
@@ -612,9 +597,7 @@ class WebCrawler:
 
     def get_status(self):
         """Get current crawl status and results"""
-        if self._demo_limit_reached and not self.is_running:
-            status = 'demo_stopped'
-        elif not self.is_running and self.stats['crawled'] > 0:
+        if not self.is_running and self.stats['crawled'] > 0:
             status = 'completed'
         elif not self.is_running and self.stats['crawled'] == 0:
             status = 'idle'
@@ -659,9 +642,7 @@ class WebCrawler:
             'issues': self.issue_detector.get_issues() if self.issue_detector else [],
             'progress': min(100, (self.stats['crawled'] / max(link_stats['discovered'], 1)) * 100),
             'memory': self.memory_monitor.get_stats(),
-            'memory_data': data_sizes,
-            'demo_stopped': self._demo_limit_reached,
-            'demo_mode': self.config.get('demo_mode', False)
+            'memory_data': data_sizes
         }
 
     def _save_batch_to_db(self, force=False):
@@ -858,12 +839,6 @@ class WebCrawler:
                     for future in completed_futures:
                         del active_futures[future]
 
-                    # Demo mode: check per-user memory limit
-                    if self.config.get('demo_mode') and self.user_memory.total_bytes >= self.config.get('demo_memory_limit_bytes', 0):
-                        print(f"DEMO MODE: Per-user memory limit reached ({self.user_memory.total_mb:.0f}MB)")
-                        self._demo_limit_reached = True
-                        break
-
                     # Check for completion
                     if self.stats['crawled'] >= self.config['max_urls']:
                         print(f"Reached maximum URLs limit ({self.config['max_urls']})")
@@ -883,33 +858,25 @@ class WebCrawler:
                     print(f"Error in crawl worker: {e}")
                     time.sleep(1)
 
-        # Skip post-processing if demo limit was hit — no further memory use
-        if not self._demo_limit_reached:
-            # Update all linked_from fields before completing
-            self._update_all_linked_from()
+        # Update all linked_from fields before completing
+        self._update_all_linked_from()
 
-            # Run duplication detection on all crawled content
-            if self.issue_detector and self.config.get('enable_duplication_check', True):
-                print("Running duplication detection...")
-                duplication_threshold = self.config.get('duplication_threshold', 0.85)
-                self.issue_detector.detect_duplication_issues(self.crawl_results, duplication_threshold)
-                print(f"Duplication detection complete. Total issues: {len(self.issue_detector.get_issues())}")
+        # Run duplication detection on all crawled content
+        if self.issue_detector and self.config.get('enable_duplication_check', True):
+            print("Running duplication detection...")
+            duplication_threshold = self.config.get('duplication_threshold', 0.85)
+            self.issue_detector.detect_duplication_issues(self.crawl_results, duplication_threshold)
+            print(f"Duplication detection complete. Total issues: {len(self.issue_detector.get_issues())}")
 
         # Save final data and set appropriate status
         if self.db_save_enabled and self.crawl_id:
             self._save_batch_to_db(force=True)
             from src.crawl_db import set_crawl_status
-            if self._demo_limit_reached:
-                set_crawl_status(self.crawl_id, 'demo_stopped')
-            else:
-                set_crawl_status(self.crawl_id, 'completed')
+            set_crawl_status(self.crawl_id, 'completed')
 
         # Mark crawl as complete
         self.is_running = False
-        if self._demo_limit_reached:
-            print(f"Crawl stopped (demo limit). User memory: {self.user_memory.total_mb:.0f}MB. Crawled: {self.stats['crawled']}")
-        else:
-            print(f"Crawl completed. Discovered: {self.stats['discovered']}, Crawled: {self.stats['crawled']}")
+        print(f"Crawl completed. Discovered: {self.stats['discovered']}, Crawled: {self.stats['crawled']}")
 
     def _crawl_url(self, url, depth):
         """Crawl a single URL"""
@@ -1283,12 +1250,6 @@ class WebCrawler:
                         except Exception as e:
                             print(f"Error in async crawl task: {e}")
 
-                # Demo mode: check per-user memory limit
-                if self.config.get('demo_mode') and self.user_memory.total_bytes >= self.config.get('demo_memory_limit_bytes', 0):
-                    print(f"DEMO MODE: Per-user memory limit reached ({self.user_memory.total_mb:.0f}MB)")
-                    self._demo_limit_reached = True
-                    break
-
                 # Check completion
                 link_stats = self.link_manager.get_stats()
                 if link_stats['pending'] == 0 and len(active_tasks) == 0:
@@ -1301,25 +1262,21 @@ class WebCrawler:
                 self.diagnostics['stopped_by_max_urls'] = True
 
         finally:
-            if not self._demo_limit_reached:
-                # Update all linked_from fields before completing
-                self._update_all_linked_from()
+            # Update all linked_from fields before completing
+            self._update_all_linked_from()
 
-                # Run duplication detection on all crawled content
-                if self.issue_detector and self.config.get('enable_duplication_check', True):
-                    print("Running duplication detection...")
-                    duplication_threshold = self.config.get('duplication_threshold', 0.85)
-                    self.issue_detector.detect_duplication_issues(self.crawl_results, duplication_threshold)
-                    print(f"Duplication detection complete. Total issues: {len(self.issue_detector.get_issues())}")
+            # Run duplication detection on all crawled content
+            if self.issue_detector and self.config.get('enable_duplication_check', True):
+                print("Running duplication detection...")
+                duplication_threshold = self.config.get('duplication_threshold', 0.85)
+                self.issue_detector.detect_duplication_issues(self.crawl_results, duplication_threshold)
+                print(f"Duplication detection complete. Total issues: {len(self.issue_detector.get_issues())}")
 
             # Save final data and set appropriate status
             if self.db_save_enabled and self.crawl_id:
                 self._save_batch_to_db(force=True)
                 from src.crawl_db import set_crawl_status
-                if self._demo_limit_reached:
-                    set_crawl_status(self.crawl_id, 'demo_stopped')
-                else:
-                    set_crawl_status(self.crawl_id, 'completed')
+                set_crawl_status(self.crawl_id, 'completed')
 
             # Clean up
             await self.js_renderer.cleanup()

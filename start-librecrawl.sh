@@ -81,7 +81,7 @@ else
     fi
 
     # Run LibreCrawl with Python in local mode
-    echo "Starting LibreCrawl in local mode..."
+    echo "Starting Crawlyx..."
     echo "Opening browser to http://localhost:5000"
 
     # Open browser after 2 seconds (give Flask time to start)
@@ -93,6 +93,6 @@ else
         fi
     }) &
 
-    # Run main.py with local flag
-    python3 main.py -l
+    # Run main.py
+    python3 main.py
 fi

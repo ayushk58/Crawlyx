@@ -5,221 +5,31 @@ import json
 import xml.etree.ElementTree as ET
 import uuid
 import webbrowser
-import argparse
 import secrets
-import string
 import os
 from io import StringIO
 from datetime import datetime, timedelta
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, session
 from flask_compress import Compress
-from functools import wraps
 from src.crawler import WebCrawler
 from src.settings_manager import SettingsManager
-from src.auth_db import init_db, create_user, authenticate_user, get_user_by_id, log_guest_crawl, get_guest_crawls_last_24h, verify_user, set_user_tier, create_verification_token, verify_token, get_user_by_email
-from src.email_service import send_verification_email, send_welcome_email
+from src.settings_db import init_db
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
 load_dotenv()
 
-# Parse command line arguments
-parser = argparse.ArgumentParser(description='Crawlyx - Site Crawler & SEO Auditor')
-parser.add_argument('--local', '-l', action='store_true',
-                    help='Run in local mode (all users get admin tier, no rate limits)')
-parser.add_argument('--disable-register', '-dr', action='store_true',
-                    help='Disable new user registrations')
-parser.add_argument('--disable-guest', '-dg', action='store_true',
-                    help='Disable guest login')
-parser.add_argument('--demo', '-dm', action='store_true',
-                    help='Demo mode: 1.5GB memory limit per user, crawls auto-stop at limit')
-parser.add_argument('--dangerously-skip-auth', '-dsa', action='store_true',
-                    help='DANGEROUS: Allow anyone to log in as any username with no password. '
-                         'The username is only used to separate per-user sessions. '
-                         'Do NOT use on a public network or in production.')
-args = parser.parse_args()
-
-LOCAL_MODE = args.local or os.getenv('LOCAL_MODE', '').lower() in ('true', '1', 'yes')
-DISABLE_REGISTER = args.disable_register or os.getenv('REGISTRATION_DISABLED', '').lower() in ('true', '1', 'yes')
-DISABLE_GUEST = args.disable_guest or os.getenv('DISABLE_GUEST', '').lower() in ('true', '1', 'yes')
-DEMO_MODE = args.demo or os.getenv('DEMO_MODE', '').lower() in ('true', '1', 'yes')
-SKIP_AUTH = args.dangerously_skip_auth or os.getenv('DANGEROUSLY_SKIP_AUTH', '').lower() in ('true', '1', 'yes')
+# Single local user - no accounts, no auth
+LOCAL_USER_ID = 1
 
 app = Flask(__name__, template_folder='web/templates', static_folder='web/static')
 app.secret_key = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
-if not os.environ.get('SECRET_KEY'):
-    print('⚠️  WARNING: SECRET_KEY not set — using an ephemeral random key. '
-          'Sessions will not persist across restarts. Set SECRET_KEY in production.', flush=True)
 
 # Enable compression for all responses
 Compress(app)
 
 # Initialize database on startup
 init_db()
-
-def generate_random_password(length=16):
-    """Generate a random password with letters, digits, and symbols"""
-    alphabet = string.ascii_letters + string.digits + string.punctuation
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
-
-def auto_login_local_mode():
-    """Auto-login for local mode - creates or logs into 'local' admin account"""
-    import sqlite3
-    try:
-        conn = sqlite3.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'users.db'))
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
-        # Check if 'local' user exists
-        cursor.execute('SELECT id, username, tier FROM users WHERE username = ?', ('local',))
-        user = cursor.fetchone()
-
-        if user:
-            # User exists, just log them in
-            session['user_id'] = user['id']
-            session['username'] = user['username']
-            session['tier'] = 'admin'
-            session.permanent = True
-            print(f"Auto-logged in as existing 'local' user (ID: {user['id']})")
-        else:
-            # Create new local user with random password
-            random_password = generate_random_password()
-            from src.auth_db import hash_password
-            password_hash = hash_password(random_password)
-
-            cursor.execute('''
-                INSERT INTO users (username, email, password_hash, verified, tier)
-                VALUES (?, ?, ?, 1, 'admin')
-            ''', ('local', 'local@localhost', password_hash))
-            conn.commit()
-
-            user_id = cursor.lastrowid
-
-            # Log in the new user
-            session['user_id'] = user_id
-            session['username'] = 'local'
-            session['tier'] = 'admin'
-            session.permanent = True
-
-            print(f"Created and auto-logged in as new 'local' admin user (ID: {user_id})")
-            print(f"Generated password: {random_password}")
-
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"Error in auto_login_local_mode: {e}")
-        return False
-
-def skip_auth_login(username):
-    """Skip-auth login: create user record if missing, log them in.
-
-    Each username gets its own user_id, which drives per-user crawler
-    instance and settings isolation. No password is checked. Always
-    grants admin tier (matches local-mode behavior).
-
-    Returns (success, message).
-    """
-    import sqlite3
-    try:
-        conn = sqlite3.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'users.db'))
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
-        cursor.execute('SELECT id, username FROM users WHERE username = ?', (username,))
-        user = cursor.fetchone()
-
-        if user:
-            user_id = user['id']
-        else:
-            from src.auth_db import hash_password
-            random_password = generate_random_password()
-            password_hash = hash_password(random_password)
-            cursor.execute('''
-                INSERT INTO users (username, email, password_hash, verified, tier)
-                VALUES (?, ?, ?, 1, 'admin')
-            ''', (username, f'{username}@skipauth.local', password_hash))
-            conn.commit()
-            user_id = cursor.lastrowid
-
-        conn.close()
-
-        session['user_id'] = user_id
-        session['username'] = username
-        session['tier'] = 'admin'
-        session.permanent = True
-
-        return True, 'Logged in (authentication skipped)'
-    except sqlite3.IntegrityError as e:
-        # Most likely the generated email collides with an existing account
-        # whose email happens to match. Fall back to a clearer message.
-        return False, f'Username conflict: try a different username ({e})'
-    except Exception as e:
-        print(f"Error in skip_auth_login: {e}")
-        return False, f'Login error: {str(e)}'
-
-if LOCAL_MODE:
-    print("=" * 60)
-    print("LOCAL MODE ENABLED")
-    print("All users will have admin tier access")
-    print("No rate limits or tier restrictions")
-    print("Auto-login enabled with 'local' admin account")
-    print("=" * 60)
-
-if DISABLE_REGISTER:
-    print("=" * 60)
-    print("REGISTRATION DISABLED")
-    print("New user registrations are not allowed")
-    print("=" * 60)
-
-if DISABLE_GUEST:
-    print("=" * 60)
-    print("GUEST MODE DISABLED")
-    print("Guest login is not allowed")
-    print("=" * 60)
-
-if DEMO_MODE:
-    print("=" * 60)
-    print("DEMO MODE ENABLED")
-    print("Memory limit: 1.5GB per user")
-    print("Crawls will auto-stop when limit is reached")
-    print("=" * 60)
-
-if SKIP_AUTH:
-    print("=" * 60)
-    print("⚠️  DANGEROUSLY SKIP AUTH ENABLED")
-    print("Anyone can log in as any username with no password!")
-    print("Username is used only to separate per-user sessions.")
-    print("DO NOT use on a public network or production server!")
-    print("=" * 60)
-
-def get_client_ip():
-    """Get the real client IP address, checking Cloudflare headers first"""
-    # Check Cloudflare header first
-    if 'CF-Connecting-IP' in request.headers:
-        return request.headers['CF-Connecting-IP']
-    # Check other common proxy headers
-    if 'X-Forwarded-For' in request.headers:
-        # X-Forwarded-For can contain multiple IPs, take the first one
-        return request.headers['X-Forwarded-For'].split(',')[0].strip()
-    if 'X-Real-IP' in request.headers:
-        return request.headers['X-Real-IP']
-    # Fall back to direct connection IP
-    return request.remote_addr
-
-def login_required(f):
-    """Decorator to require login for routes"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        # In local mode, auto-login if not already logged in
-        if LOCAL_MODE and 'user_id' not in session:
-            auto_login_local_mode()
-        elif 'user_id' not in session:
-            # Not in local mode and not logged in
-            if request.path.startswith('/api/'):
-                return jsonify({'success': False, 'error': 'Authentication required'}), 401
-            return redirect(url_for('login_page'))
-        return f(*args, **kwargs)
-    return decorated_function
 
 # Multi-tenant crawler instances
 crawler_instances = {}  # session_id -> {'crawler': WebCrawler, 'settings': SettingsManager, 'last_accessed': datetime}
@@ -232,16 +42,14 @@ def get_or_create_crawler():
         session['session_id'] = str(uuid.uuid4())
 
     session_id = session['session_id']
-    user_id = session.get('user_id')  # Get user_id from session
-    tier = session.get('tier', 'guest')  # Get tier from session
 
     with instances_lock:
         # Check if crawler exists for this session
         if session_id not in crawler_instances:
-            print(f"Creating new crawler instance for session: {session_id}, user: {user_id}, tier: {tier}")
+            print(f"Creating new crawler instance for session: {session_id}")
             crawler_instances[session_id] = {
                 'crawler': WebCrawler(),
-                'settings': SettingsManager(session_id=session_id, user_id=user_id, tier=tier),  # Per-user settings
+                'settings': SettingsManager(session_id=session_id, user_id=LOCAL_USER_ID),
                 'last_accessed': datetime.now()
             }
         else:
@@ -257,16 +65,14 @@ def get_session_settings():
         session['session_id'] = str(uuid.uuid4())
 
     session_id = session['session_id']
-    user_id = session.get('user_id')  # Get user_id from session
-    tier = session.get('tier', 'guest')  # Get tier from session
 
     with instances_lock:
         # Create instance if it doesn't exist
         if session_id not in crawler_instances:
-            print(f"Creating new settings instance for session: {session_id}, user: {user_id}, tier: {tier}")
+            print(f"Creating new settings instance for session: {session_id}")
             crawler_instances[session_id] = {
                 'crawler': WebCrawler(),
-                'settings': SettingsManager(session_id=session_id, user_id=user_id, tier=tier),
+                'settings': SettingsManager(session_id=session_id, user_id=LOCAL_USER_ID),
                 'last_accessed': datetime.now()
             }
         else:
@@ -537,250 +343,29 @@ def generate_issues_json_export(issues):
         'all_issues': issues
     }, indent=2)
 
-@app.route('/login')
-def login_page():
-    # In local mode, auto-login and redirect to index
-    if LOCAL_MODE:
-        auto_login_local_mode()
-        return redirect(url_for('index'))
-    # Redirect to app if already logged in
-    if 'user_id' in session:
-        return redirect(url_for('index'))
-    return render_template('login.html', registration_disabled=DISABLE_REGISTER, guest_disabled=DISABLE_GUEST, skip_auth=SKIP_AUTH)
-
-@app.route('/register')
-def register_page():
-    # Redirect to app if already logged in
-    if 'user_id' in session:
-        return redirect(url_for('index'))
-    return render_template('register.html', registration_disabled=DISABLE_REGISTER)
-
-@app.route('/verify')
-def verify_email():
-    """Email verification endpoint"""
-    token = request.args.get('token')
-
-    if not token:
-        return render_template('verification_result.html',
-                             success=False,
-                             message='Invalid verification link',
-                             app_source='main')
-
-    # Verify the token
-    success, message, app_source, user_email = verify_token(token)
-
-    # Send welcome email if successful
-    if success and user_email:
-        try:
-            user = get_user_by_email(user_email)
-            if user:
-                send_welcome_email(user_email, user['username'], app_source or 'main')
-        except Exception as e:
-            print(f"Error sending welcome email: {e}")
-
-    # Determine redirect URL based on app_source
-    redirect_url = None
-    if success:
-        if app_source == 'workshop':
-            redirect_url = os.getenv('WORKSHOP_APP_URL', 'https://workshop.librecrawl.com')
-        else:
-            redirect_url = url_for('login_page')
-
-    return render_template('verification_result.html',
-                         success=success,
-                         message=message,
-                         app_source=app_source or 'main',
-                         redirect_url=redirect_url)
-
-@app.route('/api/register', methods=['POST'])
-def register():
-    # Check if registration is disabled
-    if DISABLE_REGISTER:
-        return jsonify({'success': False, 'message': 'Registration is currently disabled'})
-
-    data = request.get_json()
-    username = data.get('username')
-    email = data.get('email')
-    password = data.get('password')
-
-    success, message, user_id = create_user(username, email, password)
-
-    # In local mode, auto-verify and set to admin tier
-    if success and LOCAL_MODE:
-        try:
-            from src.auth_db import verify_user, set_user_tier
-            # Get the user that was just created
-            import sqlite3
-            conn = sqlite3.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'users.db'))
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute('SELECT id FROM users WHERE username = ?', (username,))
-            user = cursor.fetchone()
-            conn.close()
-
-            if user:
-                verify_user(user['id'])
-                set_user_tier(user['id'], 'admin')
-                message = 'Account created and verified! You have admin access in local mode.'
-        except Exception as e:
-            print(f"Error during local mode auto-verification: {e}")
-            # Don't fail the registration, just log the error
-            # The account is still created successfully
-    elif success:
-        # Not in local mode - send verification email
-        is_resend = (message == 'resend')
-        try:
-            # Create verification token
-            token = create_verification_token(user_id, app_source='main')
-            if token:
-                # Send verification email
-                email_success, email_message = send_verification_email(
-                    email, username, token, app_source='main', is_resend=is_resend
-                )
-                if email_success:
-                    if is_resend:
-                        message = 'A verification email was already sent to this address. We\'ve updated your account details and sent a new verification link.'
-                    else:
-                        message = 'Registration successful! Please check your email to verify your account.'
-                else:
-                    message = 'Account created, but we could not send the verification email. Please contact support.'
-                    print(f"Email error: {email_message}")
-            else:
-                message = 'Account created, but verification token generation failed. Please contact support.'
-        except Exception as e:
-            print(f"Error sending verification email: {e}")
-            message = 'Account created, but we could not send the verification email. Please contact support.'
-
-    return jsonify({'success': success, 'message': message})
-
-@app.route('/api/login', methods=['POST'])
-def login():
-    data = request.get_json()
-    username = (data.get('username') or '').strip()
-    password = data.get('password') or ''
-
-    # Dangerously skip auth: accept any username with no password.
-    # Username is only used to separate per-user sessions.
-    if SKIP_AUTH:
-        if not username:
-            return jsonify({'success': False, 'message': 'Username required'})
-        if len(username) > 50:
-            return jsonify({'success': False, 'message': 'Username must be 50 characters or less'})
-        success, message = skip_auth_login(username)
-        return jsonify({'success': success, 'message': message})
-
-    success, message, user_data = authenticate_user(username, password)
-
-    if success:
-        session['user_id'] = user_data['id']
-        session['username'] = user_data['username']
-        # In local mode, always give admin tier
-        session['tier'] = 'admin' if LOCAL_MODE else user_data['tier']
-        session.permanent = True  # Remember login
-
-    return jsonify({'success': success, 'message': message})
-
-@app.route('/api/guest-login', methods=['POST'])
-def guest_login():
-    """Login as a guest user (no account required, limited to 3 crawls/24h)"""
-    if DISABLE_GUEST:
-        return jsonify({'success': False, 'message': 'Guest login is disabled'})
-
-    # Create a guest session with no user_id but with tier='guest'
-    # In local mode, guests also get admin tier
-    session['user_id'] = None
-    session['username'] = 'Guest'
-    session['tier'] = 'admin' if LOCAL_MODE else 'guest'
-    session.permanent = False  # Don't persist guest sessions
-
-    return jsonify({'success': True, 'message': 'Logged in as guest'})
-
-@app.route('/api/logout', methods=['POST'])
-@login_required
-def logout():
-    session.clear()
-    return jsonify({'success': True, 'message': 'Logged out successfully'})
-
-@app.route('/api/user/info')
-@login_required
-def user_info():
-    """Get current user info including tier"""
-    from src.auth_db import get_crawls_last_24h
-    user_id = session.get('user_id')
-    tier = session.get('tier', 'guest')
-    username = session.get('username')
-
-    # Get crawl count
-    crawls_today = 0
-    if tier == 'guest':
-        # For guests, count from IP address
-        client_ip = get_client_ip()
-        crawls_today = get_guest_crawls_last_24h(client_ip)
-    else:
-        # For registered users, count from database
-        crawls_today = get_crawls_last_24h(user_id)
-
-    return jsonify({
-        'success': True,
-        'user': {
-            'id': user_id,
-            'username': username,
-            'tier': tier,
-            'crawls_today': crawls_today,
-            'crawls_remaining': max(0, 3 - crawls_today) if tier == 'guest' else -1
-        }
-    })
-
 @app.route('/')
 def index():
-    # In local mode, auto-login if not already logged in
-    if LOCAL_MODE and 'user_id' not in session:
-        auto_login_local_mode()
-    elif 'user_id' not in session:
-        # Not in local mode and not logged in, redirect to login
-        return redirect(url_for('login_page'))
     return render_template('index.html')
 
 @app.route('/dashboard')
-@login_required
 def dashboard():
     """Crawl history dashboard"""
     return render_template('dashboard.html')
 
 @app.route('/debug/memory')
-@login_required
 def debug_memory_page():
     """Debug page with nice UI for memory monitoring"""
     return render_template('debug_memory.html')
 
 @app.route('/api/start_crawl', methods=['POST'])
-@login_required
 def start_crawl():
-    from src.auth_db import get_crawls_last_24h, log_crawl_start
-
     data = request.get_json()
     url = data.get('url')
 
     if not url:
         return jsonify({'success': False, 'error': 'URL is required'})
 
-    user_id = session.get('user_id')
     session_id = session.get('session_id')
-    tier = session.get('tier', 'guest')
-
-    # Check guest limits (IP-based) - skip in local mode
-    if tier == 'guest' and not LOCAL_MODE:
-        client_ip = get_client_ip()
-        crawls_from_ip = get_guest_crawls_last_24h(client_ip)
-
-        if crawls_from_ip >= 3:
-            return jsonify({
-                'success': False,
-                'error': 'Guest limit reached: 3 crawls per 24 hours from your IP address. Please register for unlimited crawls.'
-            })
-
-        # Log this guest crawl
-        log_guest_crawl(client_ip)
 
     # Get or create crawler for this session
     crawler = get_or_create_crawler()
@@ -793,31 +378,22 @@ def start_crawl():
     except Exception as e:
         print(f"Warning: Could not apply settings: {e}")
 
-    # Enforce demo mode limits
-    if DEMO_MODE:
-        crawler.config['demo_mode'] = True
-        crawler.config['demo_memory_limit_bytes'] = int(1.5 * 1024 * 1024 * 1024)  # 1.5GB
-
     # Pass user_id and session_id for database persistence
-    success, message = crawler.start_crawl(url, user_id=user_id, session_id=session_id)
+    success, message = crawler.start_crawl(url, user_id=LOCAL_USER_ID, session_id=session_id)
 
     # Store crawl_id in session
     if success and crawler.crawl_id:
         session['current_crawl_id'] = crawler.crawl_id
-        # Also log to old crawl_history for compatibility
-        log_crawl_start(user_id, url)
 
     return jsonify({'success': success, 'message': message, 'crawl_id': crawler.crawl_id})
 
 @app.route('/api/stop_crawl', methods=['POST'])
-@login_required
 def stop_crawl():
     crawler = get_or_create_crawler()
     success, message = crawler.stop_crawl()
     return jsonify({'success': success, 'message': message})
 
 @app.route('/api/crawl_status')
-@login_required
 def crawl_status():
     crawler = get_or_create_crawler()
     settings_manager = get_session_settings()
@@ -858,7 +434,6 @@ def crawl_status():
     return jsonify(status_data)
 
 @app.route('/api/visualization_data')
-@login_required
 def visualization_data():
     """Get graph data for site structure visualization"""
     try:
@@ -955,7 +530,6 @@ def visualization_data():
         })
 
 @app.route('/api/debug/memory')
-@login_required
 def debug_memory():
     """Debug endpoint showing memory stats for all active crawler instances"""
     with instances_lock:
@@ -979,7 +553,6 @@ def debug_memory():
         return jsonify(memory_stats)
 
 @app.route('/api/debug/memory/profile')
-@login_required
 def debug_memory_profile():
     """Detailed memory profiling - what's actually using the RAM"""
     from src.core.memory_profiler import MemoryProfiler
@@ -1006,7 +579,6 @@ def debug_memory_profile():
         })
 
 @app.route('/api/filter_issues', methods=['POST'])
-@login_required
 def filter_issues():
     try:
         data = request.get_json()
@@ -1026,7 +598,6 @@ def filter_issues():
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/get_settings')
-@login_required
 def get_settings():
     try:
         settings_manager = get_session_settings()
@@ -1036,7 +607,6 @@ def get_settings():
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/save_settings', methods=['POST'])
-@login_required
 def save_settings():
     try:
         data = request.get_json()
@@ -1047,7 +617,6 @@ def save_settings():
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/reset_settings', methods=['POST'])
-@login_required
 def reset_settings():
     try:
         settings_manager = get_session_settings()
@@ -1057,7 +626,6 @@ def reset_settings():
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/update_crawler_settings', methods=['POST'])
-@login_required
 def update_crawler_settings():
     try:
         crawler = get_or_create_crawler()
@@ -1070,7 +638,6 @@ def update_crawler_settings():
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/pause_crawl', methods=['POST'])
-@login_required
 def pause_crawl():
     try:
         crawler = get_or_create_crawler()
@@ -1080,7 +647,6 @@ def pause_crawl():
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/resume_crawl', methods=['POST'])
-@login_required
 def resume_crawl():
     try:
         crawler = get_or_create_crawler()
@@ -1090,11 +656,10 @@ def resume_crawl():
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/crawls/list')
-@login_required
 def list_crawls():
     """Get all crawls for current user"""
     try:
-        user_id = session.get('user_id')
+        user_id = LOCAL_USER_ID
         from src.crawl_db import get_user_crawls, get_crawl_count
 
         limit = request.args.get('limit', 50, type=int)
@@ -1113,11 +678,10 @@ def list_crawls():
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/crawls/<int:crawl_id>')
-@login_required
 def get_crawl(crawl_id):
     """Get complete crawl data by ID"""
     try:
-        user_id = session.get('user_id')
+        user_id = LOCAL_USER_ID
         from src.crawl_db import get_crawl_by_id, load_crawled_urls, load_crawl_links, load_crawl_issues
 
         # Get crawl metadata
@@ -1125,9 +689,6 @@ def get_crawl(crawl_id):
         if not crawl:
             return jsonify({'success': False, 'error': 'Crawl not found'}), 404
 
-        # Check ownership (guests have user_id = None)
-        if user_id and crawl.get('user_id') != user_id:
-            return jsonify({'success': False, 'error': 'Unauthorized'}), 403
 
         # Load all data
         urls = load_crawled_urls(crawl_id)
@@ -1147,11 +708,10 @@ def get_crawl(crawl_id):
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/crawls/<int:crawl_id>/load', methods=['POST'])
-@login_required
 def load_crawl_into_session(crawl_id):
     """Load a historical crawl into the current session"""
     try:
-        user_id = session.get('user_id')
+        user_id = LOCAL_USER_ID
         from src.crawl_db import get_crawl_by_id, load_crawled_urls, load_crawl_links, load_crawl_issues
 
         # Get crawl metadata
@@ -1159,9 +719,6 @@ def load_crawl_into_session(crawl_id):
         if not crawl:
             return jsonify({'success': False, 'error': 'Crawl not found'}), 404
 
-        # Check ownership
-        if user_id and crawl.get('user_id') != user_id:
-            return jsonify({'success': False, 'error': 'Unauthorized'}), 403
 
         # Get current crawler instance
         crawler = get_or_create_crawler()
@@ -1224,20 +781,15 @@ def load_crawl_into_session(crawl_id):
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/crawls/<int:crawl_id>/resume', methods=['POST'])
-@login_required
 def resume_crawl_endpoint(crawl_id):
     """Resume an interrupted crawl"""
     try:
-        user_id = session.get('user_id')
+        user_id = LOCAL_USER_ID
         session_id = session.get('session_id')
 
         # Get crawler for this session
         crawler = get_or_create_crawler()
 
-        # Enforce demo mode limits on resumed crawls
-        if DEMO_MODE:
-            crawler.config['demo_mode'] = True
-            crawler.config['demo_memory_limit_bytes'] = int(1.5 * 1024 * 1024 * 1024)
 
         # Resume from database
         success, message = crawler.resume_from_database(crawl_id, user_id=user_id, session_id=session_id)
@@ -1252,20 +804,14 @@ def resume_crawl_endpoint(crawl_id):
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/crawls/<int:crawl_id>/delete', methods=['DELETE'])
-@login_required
 def delete_crawl_endpoint(crawl_id):
     """Delete a crawl and all associated data"""
     try:
-        user_id = session.get('user_id')
         from src.crawl_db import delete_crawl, get_crawl_by_id
 
-        # Verify ownership
         crawl = get_crawl_by_id(crawl_id)
         if not crawl:
             return jsonify({'success': False, 'error': 'Crawl not found'}), 404
-
-        if user_id and crawl.get('user_id') != user_id:
-            return jsonify({'success': False, 'error': 'Unauthorized'}), 403
 
         success = delete_crawl(crawl_id)
         return jsonify({'success': success, 'message': 'Crawl deleted successfully' if success else 'Failed to delete crawl'})
@@ -1273,20 +819,14 @@ def delete_crawl_endpoint(crawl_id):
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/crawls/<int:crawl_id>/archive', methods=['POST'])
-@login_required
 def archive_crawl(crawl_id):
     """Archive crawl (mark as archived but keep data)"""
     try:
-        user_id = session.get('user_id')
         from src.crawl_db import set_crawl_status, get_crawl_by_id
 
-        # Verify ownership
         crawl = get_crawl_by_id(crawl_id)
         if not crawl:
             return jsonify({'success': False, 'error': 'Crawl not found'}), 404
-
-        if user_id and crawl.get('user_id') != user_id:
-            return jsonify({'success': False, 'error': 'Unauthorized'}), 403
 
         success = set_crawl_status(crawl_id, 'archived')
         return jsonify({'success': success, 'message': 'Crawl archived successfully' if success else 'Failed to archive crawl'})
@@ -1294,16 +834,15 @@ def archive_crawl(crawl_id):
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/crawls/stats')
-@login_required
 def crawl_stats():
     """Get statistics about user's crawls"""
     try:
-        user_id = session.get('user_id')
+        user_id = LOCAL_USER_ID
         from src.crawl_db import get_crawl_count, get_database_size_mb
         import sqlite3
 
         # Get counts by status
-        conn = sqlite3.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'users.db'))
+        conn = sqlite3.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'crawlyx.db'))
         cursor = conn.cursor()
 
         cursor.execute('''
@@ -1333,7 +872,6 @@ def _get_analysis_inputs():
             data.get('issues', []), data.get('diagnostics', {}))
 
 @app.route('/api/domain-rating')
-@login_required
 def domain_rating():
     """Ahrefs public Domain Rating for the crawl target domain."""
     from src.domain_rating import fetch_domain_rating
@@ -1344,7 +882,6 @@ def domain_rating():
     return jsonify(result)
 
 @app.route('/api/analysis/summary')
-@login_required
 def analysis_summary():
     """Executive summary: prioritized issue groups, link intelligence, clusters"""
     from src.analysis.crawl_summarizer import summarize_crawl
@@ -1358,7 +895,6 @@ def analysis_summary():
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/analysis/link_graph')
-@login_required
 def analysis_link_graph():
     """Per-page link metrics and link reports"""
     from src.analysis.link_graph_analyzer import analyze_link_graph
@@ -1372,7 +908,6 @@ def analysis_link_graph():
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/analysis/content_similarity')
-@login_required
 def analysis_content_similarity():
     """Similar-content clusters (graded A-F) and low-relevance pages"""
     from src.analysis.content_similarity import analyze_content_similarity
@@ -1386,7 +921,6 @@ def analysis_content_similarity():
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/report/html')
-@login_required
 def report_html():
     """Standalone HTML audit report for the current crawl"""
     from src.analysis.crawl_summarizer import summarize_crawl
@@ -1406,7 +940,6 @@ def report_html():
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/visualization/graph')
-@login_required
 def visualization_graph():
     """Authority-flow graph at three zoom levels.
 
@@ -1432,25 +965,7 @@ def visualization_graph():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
-@app.route('/api/plugins/list')
-@login_required
-def list_plugins():
-    """Auto-discover plugin files in web/static/plugins/.
-
-    Files starting with '_' are treated as disabled (matches the plugins README).
-    """
-    plugins_dir = os.path.join(app.static_folder, 'plugins')
-    plugins = []
-    try:
-        for filename in sorted(os.listdir(plugins_dir)):
-            if filename.endswith('.js') and not filename.startswith('_'):
-                plugins.append(filename)
-    except OSError:
-        pass
-    return jsonify({'success': True, 'plugins': plugins})
-
 @app.route('/api/export_data', methods=['POST'])
-@login_required
 def export_data():
     try:
         data = request.get_json()

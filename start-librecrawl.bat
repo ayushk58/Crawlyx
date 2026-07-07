@@ -36,7 +36,7 @@ if errorlevel 1 goto installdeps
 :rundirect
 echo Starting LibreCrawl...
 start /b cmd /c "timeout /t 2 /nobreak >nul && start http://localhost:5000"
-python main.py -l
+python main.py
 exit /b
 
 :trypy

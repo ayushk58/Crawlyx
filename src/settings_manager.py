@@ -3,71 +3,18 @@ import os
 from pathlib import Path
 
 class SettingsManager:
-    def __init__(self, session_id=None, user_id=None, tier='guest'):
+    def __init__(self, session_id=None, user_id=None):
         """
         Initialize settings manager
-        user_id: Database user ID for per-user settings storage
+        user_id: Database user ID for settings storage
         session_id: Session ID (deprecated, kept for compatibility)
-        tier: User tier (guest, user, extra, admin)
         """
         self.session_id = session_id
         self.user_id = user_id
-        self.tier = tier
 
         # Load default settings
         self.default_settings = self._get_default_settings()
         self.current_settings = self.load_settings()
-
-    def _get_tier_allowed_settings(self):
-        """Get settings keys allowed for each tier - MAPPED DIRECTLY FROM HTML TABS"""
-        # guest: can only crawl, no settings control
-        guest_settings = []
-
-        # user: Crawler, Export, Issue Exclusion tabs
-        user_settings = [
-            # Crawler tab
-            'maxDepth', 'maxUrls', 'crawlDelay', 'followRedirects', 'crawlExternalLinks',
-            # Export tab
-            'exportFormat', 'exportFields',
-            # Issues tab
-            'issueExclusionPatterns'
-        ]
-
-        # extra: all in user + Filters, Requests, Custom CSS, JavaScript tabs
-        # NOTE: Advanced tab settings (concurrency, memoryLimit, logLevel, saveSession,
-        #       enableProxy, proxyUrl, customHeaders) are ADMIN ONLY
-        extra_settings = user_settings + [
-            # Requests tab
-            'userAgent', 'timeout', 'retries', 'acceptLanguage', 'respectRobotsTxt', 'allowCookies',
-            'discoverSitemaps',
-            # Filters tab
-            'includeExtensions', 'excludeExtensions', 'includePatterns', 'excludePatterns', 'maxFileSize',
-            # JavaScript tab
-            'enableJavaScript', 'jsWaitTime', 'jsTimeout', 'jsBrowser', 'jsHeadless',
-            'jsUserAgent', 'jsViewportWidth', 'jsViewportHeight', 'jsMaxConcurrentPages',
-            # Custom CSS tab
-            'customCSS'
-        ]
-
-        # admin: all settings including Advanced tab
-        admin_settings = list(self.default_settings.keys())
-
-        return {
-            'guest': guest_settings,
-            'user': user_settings,
-            'extra': extra_settings,
-            'admin': admin_settings
-        }
-
-    def filter_settings_by_tier(self, settings):
-        """Filter settings to only include ones allowed for this tier"""
-        allowed = self._get_tier_allowed_settings().get(self.tier, [])
-        if not allowed:  # guest gets nothing
-            return {}
-        if self.tier == 'admin':  # admin gets everything
-            return settings
-        # Filter to allowed keys only
-        return {k: v for k, v in settings.items() if k in allowed}
 
     def _get_default_settings(self):
         """Get fresh default settings"""
@@ -339,7 +286,7 @@ class SettingsManager:
         try:
             # If user_id is provided, load from database
             if self.user_id:
-                from src.auth_db import get_user_settings
+                from src.settings_db import get_user_settings
                 saved_settings = get_user_settings(self.user_id)
                 if saved_settings:
                     # Merge with defaults to ensure all keys are present
@@ -355,25 +302,18 @@ class SettingsManager:
             return self.default_settings.copy()
 
     def save_settings(self, settings):
-        """Save settings to database (filtered by tier)"""
+        """Save settings to database"""
         try:
-            # Filter settings by tier to prevent unauthorized changes
-            filtered_settings = self.filter_settings_by_tier(settings)
-
             # Validate settings before saving
-            # Only validate the filtered settings that the user is allowed to change
             test_settings = {**self.default_settings}
-            test_settings.update(filtered_settings)
+            test_settings.update(settings)
             if not self.validate_settings(test_settings):
                 return False, "Invalid settings provided"
 
-            # Load current settings from database to preserve unauthorized keys
             if self.user_id:
-                from src.auth_db import get_user_settings, save_user_settings
+                from src.settings_db import get_user_settings, save_user_settings
                 current_db_settings = get_user_settings(self.user_id) or self.default_settings.copy()
-
-                # Update only the filtered (allowed) keys
-                current_db_settings.update(filtered_settings)
+                current_db_settings.update(settings)
 
                 # Save back to database
                 success, message = save_user_settings(self.user_id, current_db_settings)
@@ -384,7 +324,7 @@ class SettingsManager:
                 return success, message
 
             # If no user_id, just keep in memory (session-specific)
-            self.current_settings.update(filtered_settings)
+            self.current_settings.update(settings)
             return True, "Settings saved successfully (session-specific)"
 
         except Exception as e:
