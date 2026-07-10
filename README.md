@@ -2,12 +2,6 @@
 
 A free, open-source website crawler and technical SEO auditor. Runs locally in your browser — no accounts, no rate limits, no license fees.
 
-## Demo
-
-<video src="https://github.com/ayushk58/Crawlyx/raw/main/web/static/video/crawlyx-demo.mp4" controls width="100%"></video>
-
-*30-second overview — crawl, audit, authority flow, and exports. [Download MP4](web/static/video/crawlyx-demo.mp4)*
-
 ## What it does
 
 Crawlyx crawls websites and gives you detailed information about pages, links, SEO elements, and performance — a self-hosted alternative to Screaming Frog, Sitebulb, and similar tools.
