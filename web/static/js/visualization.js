@@ -22,24 +22,34 @@ function clusterColor(index) {
     return CLUSTER_PALETTE[(index || 0) % CLUSTER_PALETTE.length];
 }
 
+const FLOW_ROLE_COLORS = {
+    receiver: '#0e9f6e',   // net authority receiver (green)
+    donor: '#2563eb',      // net authority donor (blue)
+    balanced: '#8b95a5'
+};
+
+function flowRoleColor(role) {
+    return FLOW_ROLE_COLORS[role] || FLOW_ROLE_COLORS.balanced;
+}
+
+/**
+ * Node fill for the authority tree: light -> deep emerald by score,
+ * red for pages with no authority (matches the equity-tree style).
+ */
+function authorityColor(a) {
+    if (!a || a <= 0) return '#ef4444';
+    const t = Math.sqrt(Math.max(0, Math.min(1, a / 100)));
+    const lo = [110, 214, 160], hi = [10, 122, 64];
+    const c = lo.map((l, i) => Math.round(l + (hi[i] - l) * t));
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
 function statusColor(code) {
     if (code >= 200 && code < 300) return '#16a34a';
     if (code >= 300 && code < 400) return '#2563eb';
     if (code >= 400 && code < 500) return '#d97706';
     if (code >= 500) return '#dc2626';
     return '#98a2b3';
-}
-
-/**
- * Edge color for authority flow: interpolate from a faint gray (weak)
- * to a deep emerald (strong), so the strongest flows stand out on the
- * light background.
- */
-function flowColor(t) {
-    const weak = [203, 209, 216];  // #cbd1d8
-    const strong = [17, 110, 61];  // #116e3d
-    const c = weak.map((w, i) => Math.round(w + (strong[i] - w) * t));
-    return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
 
 /**
@@ -73,7 +83,8 @@ function initVisualization() {
                     'text-max-width': '110px',
                     'overlay-opacity': 0,
                     'border-width': 1.5,
-                    'border-color': 'rgba(16,24,40,0.18)'
+                    'border-color': 'rgba(16,24,40,0.18)',
+                    'text-events': 'yes'
                 }
             },
             {
@@ -86,6 +97,27 @@ function initVisualization() {
                     'text-margin-x': 6,
                     'text-margin-y': 0,
                     'text-max-width': '190px'
+                }
+            },
+            {
+                // Authority mode: filled node, label + numbers underneath
+                selector: 'node[?flowLabel]',
+                style: {
+                    'text-wrap': 'wrap',
+                    'line-height': 1.35,
+                    'font-family': '"JetBrains Mono", monospace',
+                    'font-size': '9.5px',
+                    'text-max-width': '150px'
+                }
+            },
+            {
+                // Soft halo behind high-authority nodes
+                selector: 'node[?flowLabel][authority > 50]',
+                style: {
+                    'underlay-color': '#101828',
+                    'underlay-opacity': 0.05,
+                    'underlay-padding': 14,
+                    'underlay-shape': 'ellipse'
                 }
             },
             {
@@ -159,6 +191,18 @@ function initVisualization() {
                 }
             },
             {
+                // Top-down authority tree: root label sits below like the rest
+                selector: 'node[?flowLabel][?is_root]',
+                style: {
+                    'underlay-padding': 20,
+                    'text-valign': 'bottom',
+                    'text-halign': 'center',
+                    'text-margin-x': 0,
+                    'text-margin-y': 6,
+                    'border-width': 0
+                }
+            },
+            {
                 selector: 'node:selected',
                 style: {
                     'border-color': '#178a4e',
@@ -188,15 +232,6 @@ function initVisualization() {
                 }
             },
             {
-                // Authority edges: brightness + width encode flow strength
-                selector: 'edge[flowColor]',
-                style: {
-                    'line-color': 'data(flowColor)',
-                    'target-arrow-color': 'data(flowColor)',
-                    'opacity': 'data(flowOpacity)'
-                }
-            },
-            {
                 // Sideways tree connectors: smooth horizontal S-curves that
                 // leave the parent flat and arrive at the child flat
                 // (d3-style cubic links, as in Screaming Frog's tree graph)
@@ -208,6 +243,35 @@ function initVisualization() {
                     'control-point-weights': ele => treeEdgeGeometry(ele).weights,
                     'target-arrow-shape': 'none',
                     'opacity': 0.55
+                }
+            },
+            {
+                // Authority tree edges: vertical S-curves (d3-style cubic
+                // links, same family as the crawl tree's), width = flow
+                selector: 'edge.flow-edge',
+                style: {
+                    'curve-style': 'unbundled-bezier',
+                    'edge-distances': 'node-position',
+                    'control-point-distances': ele => flowEdgeGeometry(ele).distances,
+                    'control-point-weights': ele => flowEdgeGeometry(ele).weights,
+                    'line-color': '#8fcaa8',
+                    'target-arrow-shape': 'none',
+                    'opacity': 0.9
+                }
+            },
+            {
+                // Cross-flow edges: the other strongest inflows per page,
+                // incl. flow back into the homepage. Thin + dashed so the
+                // skeleton stays readable; arrow keeps direction obvious.
+                selector: 'edge.cross-edge',
+                style: {
+                    'line-style': 'dashed',
+                    'line-color': '#bcdfca',
+                    'width': 1.2,
+                    'target-arrow-shape': 'triangle',
+                    'target-arrow-color': '#9ccfb2',
+                    'arrow-scale': 0.55,
+                    'opacity': 0.7
                 }
             },
             {
@@ -254,10 +318,14 @@ function setupInteractions() {
                 <div class="tooltip-url">${escapeVizHtml(truncateUrl(d.url || '', 60))}</div>
                 <div class="tooltip-info">
                     ${d.authority !== undefined ? `<div><strong>Authority:</strong> ${d.authority}</div>` : ''}
+                    ${d.inflow !== undefined && vizMode === 'authority'
+                        ? `<div><strong>Flow in:</strong> ${d.inflow} &middot; <strong>out:</strong> ${d.outflow}
+                           ${d.flow_role !== 'balanced' ? ` &middot; <span style="color:${flowRoleColor(d.flow_role)}; font-weight:600;">net ${d.flow_role}</span>` : ''}</div>`
+                        : ''}
                     <div>Status: ${d.status_code}</div>
                     ${d.child_count ? `<div><strong>Children:</strong> ${d.child_count}</div>` : ''}
                     ${d.is_orphan ? '<div style="color:#dc2626;">Orphan page</div>' : ''}
-                    <div style="opacity:0.7;">Click to re-root &middot; double-click to open</div>
+                    <div style="opacity:0.7;">Click for details &middot; double-click to open</div>
                 </div>`;
         }
         tip.style.display = 'block';
@@ -285,22 +353,74 @@ function setupInteractions() {
             loadFlowGraph(vizMode, d.reroot_url);
             return;
         }
-        if (d.type === 'page' && !d.is_root) {
-            loadFlowGraph(vizMode, d.url);
-            return;
-        }
+        if (d.type !== 'page') return;
 
-        // Root tap: highlight direct neighborhood
+        // Highlight the node's direct links and open its detail card
         cy.elements().removeClass('dimmed');
         const neighborhood = event.target.neighborhood().add(event.target);
         cy.elements().not(neighborhood).addClass('dimmed');
+        showNodeCard(d, event.originalEvent);
     });
 
     cy.on('tap', function(event) {
         if (event.target === cy) {
             cy.elements().removeClass('dimmed');
+            hideNodeCard();
         }
     });
+}
+
+/**
+ * Click card: the numbers for one page — how many pages link to it,
+ * how many it links to, and how much authority moves. Re-rooting and
+ * opening the page live here as explicit buttons.
+ */
+let nodeCard = null;
+
+function hideNodeCard() {
+    if (nodeCard) nodeCard.style.display = 'none';
+}
+
+function showNodeCard(d, evt) {
+    if (!nodeCard) {
+        nodeCard = document.createElement('div');
+        nodeCard.className = 'viz-node-card';
+        document.body.appendChild(nodeCard);
+    }
+
+    const row = (label, value) =>
+        `<div class="vnc-row"><span>${label}</span><strong>${value}</strong></div>`;
+
+    const stats = [];
+    if (d.authority !== undefined) stats.push(row('Authority', d.authority));
+    if (d.in_pages !== undefined) {
+        stats.push(row('Pages linking here', d.in_pages));
+        stats.push(row('Pages it links to', d.out_pages));
+    }
+    if (d.inflow !== undefined && vizMode === 'authority') {
+        const role = d.flow_role !== 'balanced'
+            ? ` <span style="color:${flowRoleColor(d.flow_role)}; font-weight:600;">(net ${d.flow_role})</span>` : '';
+        stats.push(row('Authority in / out', `${d.inflow} / ${d.outflow}${role}`));
+    }
+    stats.push(row('Status', d.status_code));
+    if (d.is_orphan) stats.push('<div class="vnc-row" style="color:#dc2626;">Orphan page</div>');
+
+    nodeCard.innerHTML = `
+        <div class="vnc-url">${escapeVizHtml(truncateUrl(d.url || '', 70))}</div>
+        ${stats.join('')}
+        <div class="vnc-actions">
+            ${d.is_root ? '' : `<button onclick="hideNodeCard(); loadFlowGraph(vizMode, '${encodeURI(d.url)}')">Focus here</button>`}
+            <button onclick="window.open('${encodeURI(d.url)}', '_blank')">Open page</button>
+        </div>`;
+
+    nodeCard.style.display = 'block';
+    const pad = 12;
+    let x = evt.pageX + pad, y = evt.pageY + pad;
+    const rect = nodeCard.getBoundingClientRect();
+    if (x + rect.width > window.innerWidth - pad) x = evt.pageX - rect.width - pad;
+    if (y + rect.height > window.scrollY + window.innerHeight - pad) y = evt.pageY - rect.height - pad;
+    nodeCard.style.left = x + 'px';
+    nodeCard.style.top = y + 'px';
 }
 
 /**
@@ -324,6 +444,8 @@ async function loadFlowGraph(mode, focus = null) {
     let url = `/api/visualization/graph?mode=${encodeURIComponent(mode)}`;
     if (focus) url += `&focus=${encodeURIComponent(focus)}`;
 
+    hideNodeCard();
+
     try {
         const response = await fetch(url);
         const data = await response.json();
@@ -338,35 +460,41 @@ async function loadFlowGraph(mode, focus = null) {
 
         const nodes = data.nodes.map(n => {
             const d = n.data;
-            d.sideways = true;
-            if (d.type === 'group') {
-                d.color = '#8b95a5';
+            if (mode === 'authority') {
+                // Equity-tree style: filled circles sized + shaded by
+                // authority, score and link counts under the label
+                if (d.type === 'group') {
+                    d.color = '#8b95a5';
+                } else {
+                    // Name only on the canvas; the numbers live in the
+                    // click card and hover tooltip
+                    d.color = authorityColor(d.authority);
+                    d.flowLabel = true;
+                }
             } else {
-                // Uniform small open circles, SF-style; ring color carries
-                // the meaning (status in crawl tree, cluster in authority)
-                d.color = mode === 'authority'
-                    ? clusterColor(d.cluster_index)
-                    : statusColor(d.status_code);
-                d.open = true;
-                d.size = d.is_root ? 18 : 13;
+                d.sideways = true;
+                if (d.type === 'group') {
+                    d.color = '#8b95a5';
+                } else {
+                    // Small open circles, SF-style; ring color = status
+                    d.color = statusColor(d.status_code);
+                    d.open = true;
+                    d.size = d.is_root ? 18 : 13;
+                }
             }
             return { data: d };
         });
 
-        // Authority edges: stronger flow = brighter + more opaque line
-        const maxFlow = Math.max(...data.edges.map(e => e.data.flow || 0), 0);
-        const edges = data.edges.map(e => {
-            const d = e.data;
-            if (d.flow !== undefined && maxFlow > 0) {
-                const t = Math.sqrt(d.flow / maxFlow);  // sqrt: mid flows stay visible
-                d.flowColor = flowColor(t);
-                d.flowOpacity = +(0.35 + 0.6 * t).toFixed(2);
-            }
-            return { data: d };
-        });
+        const edges = data.edges.map(e => ({ data: e.data }));
 
         cy.elements().remove();
-        cy.add([...nodes, ...edges]).edges().addClass('tree-edge');
+        cy.add([...nodes, ...edges]).edges().forEach(e => {
+            if (mode === 'authority') {
+                e.addClass(e.data('cross') ? 'flow-edge cross-edge' : 'flow-edge');
+            } else {
+                e.addClass('tree-edge');
+            }
+        });
         applyFlowLayout(mode);
 
         updateVizBreadcrumb();
@@ -391,7 +519,70 @@ function loadVisualizationData() {
 }
 
 function applyFlowLayout(mode) {
-    layoutSidewaysTree();
+    if (mode === 'authority') layoutTopDownTree();
+    else layoutSidewaysTree();
+}
+
+/**
+ * Top-down tidy tree (equity-tree style): root centered at the top,
+ * one row per level, leaves spread evenly, parents centered over
+ * their children. Cross-flow edges are ignored for positioning.
+ */
+function layoutTopDownTree() {
+    const X_GAP = 150;    // horizontal gap between leaf columns
+    const Y_GAP = 175;    // vertical gap between levels
+
+    const children = {};
+    const hasParent = new Set();
+    cy.edges().forEach(e => {
+        if (e.data('cross')) return;
+        const s = e.source().id(), t = e.target().id();
+        (children[s] = children[s] || []).push(t);
+        hasParent.add(t);
+    });
+
+    let rootId = null;
+    cy.nodes().forEach(n => { if (n.data('is_root')) rootId = n.id(); });
+    if (!rootId) {
+        const roots = cy.nodes().filter(n => !hasParent.has(n.id()));
+        rootId = roots.length ? roots[0].id() : (cy.nodes().length ? cy.nodes()[0].id() : null);
+    }
+    if (!rootId) return;
+
+    const positions = {};
+    let nextCol = 0;
+    const visited = new Set();
+
+    (function place(id, depth) {
+        if (visited.has(id)) return;
+        visited.add(id);
+
+        const kids = (children[id] || []).filter(k => !visited.has(k));
+        if (kids.length === 0) {
+            positions[id] = { x: nextCol * X_GAP, y: depth * Y_GAP };
+            nextCol++;
+        } else {
+            kids.forEach(k => place(k, depth + 1));
+            const xs = kids.map(k => positions[k].x);
+            positions[id] = {
+                x: (Math.min(...xs) + Math.max(...xs)) / 2,
+                y: depth * Y_GAP
+            };
+        }
+    })(rootId, 0);
+
+    // Anything disconnected sits on its own bottom row
+    let maxY = 0;
+    Object.values(positions).forEach(p => { maxY = Math.max(maxY, p.y); });
+    cy.nodes().forEach(n => {
+        if (!positions[n.id()]) {
+            positions[n.id()] = { x: nextCol * X_GAP, y: maxY + Y_GAP };
+            nextCol++;
+        }
+    });
+
+    cy.nodes().positions(n => positions[n.id()]);
+    cy.fit(50);
 }
 
 /**
@@ -408,6 +599,7 @@ function layoutSidewaysTree() {
     const children = {};
     const hasParent = new Set();
     cy.edges().forEach(e => {
+        if (e.data('cross')) return; // overlay edges are not hierarchy
         const s = e.source().id(), t = e.target().id();
         (children[s] = children[s] || []).push(t);
         hasParent.add(t);
@@ -458,6 +650,37 @@ function layoutSidewaysTree() {
 }
 
 /**
+ * Control points for a vertical cubic link (top-down authority tree):
+ * the curve leaves the parent straight down and arrives at the child
+ * straight down, bending in the middle — the transpose of the crawl
+ * tree's horizontal S-curves.
+ */
+function flowEdgeGeometry(ele) {
+    const s = ele.source().position();
+    const t = ele.target().position();
+    const dx = t.x - s.x;
+    const dy = t.y - s.y;
+    const len2 = dx * dx + dy * dy;
+    if (len2 < 1) return { distances: [0], weights: [0.5] };
+    const len = Math.sqrt(len2);
+
+    // d3 vertical link: cubic bezier with control points (0, dy/2) and
+    // (dx, dy/2) relative to the source. Sample it at several points and
+    // express each as (weight along the chord, perpendicular offset) so
+    // cytoscape renders a faithful, smooth version of the exact curve.
+    const ym = dy / 2;
+    const distances = [], weights = [];
+    for (const u of [0.2, 0.35, 0.5, 0.65, 0.8]) {
+        const mt = 1 - u;
+        const bx = 3 * mt * u * u * dx + u * u * u * dx;
+        const by = 3 * mt * mt * u * ym + 3 * mt * u * u * ym + u * u * u * dy;
+        weights.push((bx * dx + by * dy) / len2);
+        distances.push((by * dx - bx * dy) / len);
+    }
+    return { distances, weights };
+}
+
+/**
  * Control points for a horizontal cubic link between two placed nodes:
  * the curve leaves the source flat and enters the target flat, bending
  * in the middle (control points at mid-x on each node's row).
@@ -492,12 +715,12 @@ function updateVizBreadcrumb() {
         el.innerHTML = vizFocus
             ? [link('Authority flow', "loadFlowGraph('authority')"),
                `<strong>${escapeVizHtml(truncateUrl(vizFocus, 70))}</strong>`].join(sep)
-            : '<strong>Authority flow</strong> &mdash; authority flows left to right from the homepage (3 levels) &middot; brighter, thicker line = more authority passed';
+            : '<strong>Authority flow</strong> &mdash; link equity flows down from the homepage &middot; node size/shade = authority &middot; dashed = other top inflows, incl. page &rarr; home';
     } else {
         el.innerHTML = vizFocus
             ? [link('Crawl tree', "loadFlowGraph('crawltree')"),
                `<strong>${escapeVizHtml(truncateUrl(vizFocus, 70))}</strong>`].join(sep)
-            : '<strong>Crawl tree</strong> &mdash; homepage at the left, each column is one more click away (max 5) &middot; click a page to re-root';
+            : '<strong>Crawl tree</strong> &mdash; homepage at the left, each column is one more click away (max 5) &middot; click a page for details';
     }
 }
 
@@ -514,11 +737,11 @@ function renderVizLegend(mode, clusters) {
         `<div class="legend-item"><span style="opacity:0.7;">${text}</span></div>`;
 
     if (mode === 'authority') {
-        const items = (clusters || []).slice(0, 8).map(c =>
-            item(clusterColor(c.color_index), `${escapeVizHtml(c.name)} (${c.page_count})`));
-        items.push(
-            `<div class="legend-item"><span class="legend-color" style="background: linear-gradient(to right, #cbd1d8, #116e3d); width: 36px; border-radius: 4px;"></span><span>weak &rarr; strong authority flow</span></div>`);
-        el.innerHTML = items.join('');
+        el.innerHTML = [
+            `<div class="legend-item"><span class="legend-color" style="background: linear-gradient(to right, #6ed6a0, #0a7a40); width: 36px; border-radius: 4px;"></span><span>size + shade = authority</span></div>`,
+            item('#ef4444', 'No authority'),
+            note('Line width = authority passed &middot; dashed = other top inflows (incl. back to home) &middot; click a node for numbers')
+        ].join('');
     } else {
         el.innerHTML = [
             item('#16a34a', 'Page OK'),
@@ -618,3 +841,4 @@ window.resetVisualization = resetVisualization;
 window.exportVisualizationImage = exportVisualizationImage;
 window.updateVisualizationFromLoadedData = updateVisualizationFromLoadedData;
 window.clearVisualization = clearVisualization;
+window.hideNodeCard = hideNodeCard;

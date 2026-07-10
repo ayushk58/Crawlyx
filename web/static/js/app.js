@@ -766,16 +766,8 @@ function initializeVirtualScrollers() {
             console.log('External links virtual scroller initialized');
         }
 
-        // Issues table
-        const issuesContainer = document.querySelector('#issues-tab .table-container');
-        if (issuesContainer && issuesContainer.querySelector('tbody')) {
-            virtualScrollers.issues = new VirtualScroller(issuesContainer, {
-                rowHeight: 80,
-                buffer: 25,
-                renderRow: renderIssueRow
-            });
-            console.log('Issues virtual scroller initialized');
-        }
+        // Issues table renders grouped rows directly (no virtual scroller):
+        // one row per issue type, expanded on click.
     } catch (error) {
         console.error('Error initializing virtual scrollers:', error);
     }
@@ -948,14 +940,11 @@ function updateIssuesTable(issues) {
     if (issues.length === 0) {
         if (emptyState) emptyState.style.display = 'block';
         if (issuesTable) issuesTable.style.display = 'none';
+        renderGroupedIssues();
     } else {
         if (emptyState) emptyState.style.display = 'none';
         if (issuesTable) issuesTable.style.display = 'table';
-
-        // Use virtual scroller for issues
-        if (virtualScrollers.issues) {
-            virtualScrollers.issues.setData(issues);
-        }
+        renderGroupedIssues();
     }
 
     // Update issue count in tab button (find the button, not the tab content)
@@ -991,9 +980,10 @@ function clearAllTables() {
     if (virtualScrollers.externalLinks) {
         virtualScrollers.externalLinks.clear();
     }
-    if (virtualScrollers.issues) {
-        virtualScrollers.issues.clear();
-    }
+    // Clear grouped issues table (not virtualized)
+    const issuesBody = document.getElementById('issuesTableBody');
+    if (issuesBody) issuesBody.innerHTML = '';
+    expandedIssueGroups.clear();
 
     // Clear status codes table (not virtualized)
     const statusCodesBody = document.getElementById('statusCodesTableBody');
@@ -1104,16 +1094,83 @@ function filterIssues(filterType) {
         btn.classList.toggle('active', btn.getAttribute('data-filter') === filterType);
     });
 
-    // Filter issues data and update virtual scroller
-    if (window.currentIssues && virtualScrollers.issues) {
-        let filteredIssues = window.currentIssues;
+    // Re-render the grouped view with the type filter applied
+    renderGroupedIssues();
+}
 
-        if (filterType !== 'all') {
-            filteredIssues = window.currentIssues.filter(issue => issue.type === filterType);
-        }
+/**
+ * Grouped issues view (Screaming Frog style): one row per issue type with
+ * URL count and % of crawled URLs; click a row to expand the affected URLs.
+ */
+const expandedIssueGroups = new Set();
 
-        virtualScrollers.issues.setData(filteredIssues);
+function renderGroupedIssues() {
+    const tbody = document.getElementById('issuesTableBody');
+    if (!tbody) return;
+
+    const filterType = crawlState.filters.issueFilter || 'all';
+    let issues = window.currentIssues || [];
+    if (filterType !== 'all') {
+        issues = issues.filter(issue => issue.type === filterType);
     }
+
+    // Group by issue name
+    const groups = new Map();
+    issues.forEach(issue => {
+        const key = issue.issue || 'Unknown issue';
+        if (!groups.has(key)) {
+            groups.set(key, { name: key, type: issue.type, category: issue.category || '', items: [] });
+        }
+        groups.get(key).items.push(issue);
+    });
+
+    const typeRank = { error: 0, warning: 1, info: 2 };
+    const sorted = [...groups.values()].sort((a, b) =>
+        (typeRank[a.type] ?? 3) - (typeRank[b.type] ?? 3) || b.items.length - a.items.length);
+
+    const totalUrls = (crawlState.urls && crawlState.urls.length) || 0;
+    const badge = t => `<span class="issue-badge issue-badge-${t}">${t === 'error' ? 'Issue' : t === 'warning' ? 'Warning' : 'Opportunity'}</span>`;
+
+    tbody.innerHTML = '';
+    const MAX_DETAIL_ROWS = 200;
+
+    sorted.forEach(g => {
+        const open = expandedIssueGroups.has(g.name);
+        const pct = totalUrls > 0 ? ((g.items.length / totalUrls) * 100).toFixed(2) + '%' : '—';
+
+        const row = document.createElement('tr');
+        row.className = 'issue-group-row' + (open ? ' open' : '');
+        row.innerHTML = `
+            <td><span class="issue-caret">▸</span>${escapeHtml(g.name)}</td>
+            <td>${badge(g.type)}</td>
+            <td>${escapeHtml(g.category)}</td>
+            <td class="issue-num">${g.items.length.toLocaleString()}</td>
+            <td class="issue-num">${pct}</td>`;
+        row.addEventListener('click', () => {
+            if (expandedIssueGroups.has(g.name)) expandedIssueGroups.delete(g.name);
+            else expandedIssueGroups.add(g.name);
+            renderGroupedIssues();
+        });
+        tbody.appendChild(row);
+
+        if (!open) return;
+
+        g.items.slice(0, MAX_DETAIL_ROWS).forEach(issue => {
+            const r = document.createElement('tr');
+            r.className = 'issue-detail-row';
+            r.innerHTML = `
+                <td colspan="3" style="word-break: break-all;" title="${escapeHtml(issue.url || '')}">${escapeHtml(issue.url || '')}</td>
+                <td colspan="2" style="word-break: break-word; white-space: normal;" title="${escapeHtml(issue.details || '')}">${escapeHtml(issue.details || '')}</td>`;
+            tbody.appendChild(r);
+        });
+
+        if (g.items.length > MAX_DETAIL_ROWS) {
+            const r = document.createElement('tr');
+            r.className = 'issue-detail-row issue-detail-more';
+            r.innerHTML = `<td colspan="5">+${(g.items.length - MAX_DETAIL_ROWS).toLocaleString()} more URLs — use Export for the full list</td>`;
+            tbody.appendChild(r);
+        }
+    });
 }
 
 // Filter Management
@@ -2223,37 +2280,18 @@ function renderExternalLinkRow(row, link, index) {
     `;
 }
 
-function renderIssueRow(row, issue, index) {
-    row.setAttribute('data-issue-type', issue.type);
-
-    // Set row style based on issue type
-    if (issue.type === 'error') {
-        row.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
-    } else if (issue.type === 'warning') {
-        row.style.backgroundColor = 'rgba(245, 158, 11, 0.1)';
-    } else {
-        row.style.backgroundColor = 'rgba(59, 130, 246, 0.1)';
-    }
-
-    // Create type indicator
-    let typeIcon = '';
-    let typeColor = '';
-    if (issue.type === 'error') {
-        typeIcon = '❌';
-        typeColor = '#ef4444';
-    } else if (issue.type === 'warning') {
-        typeIcon = '⚠️';
-        typeColor = '#f59e0b';
-    } else {
-        typeIcon = 'ℹ️';
-        typeColor = '#3b82f6';
-    }
-
-    row.innerHTML = `
-        <td style="word-break: break-all;" title="${issue.url}">${issue.url}</td>
-        <td><span style="color: ${typeColor};">${typeIcon}</span> ${issue.type}</td>
-        <td>${issue.category}</td>
-        <td>${issue.issue}</td>
-        <td style="word-break: break-word;" title="${issue.details}">${issue.details}</td>
-    `;
+function openDemoVideo() {
+    const modal = document.getElementById('demoModal');
+    const video = document.getElementById('demoVideo');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    if (video) video.currentTime = 0;
 }
+
+function closeDemoVideo() {
+    const modal = document.getElementById('demoModal');
+    const video = document.getElementById('demoVideo');
+    if (modal) modal.style.display = 'none';
+    if (video) video.pause();
+}
+

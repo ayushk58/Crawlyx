@@ -5,10 +5,15 @@ hairball:
 
 - crawltree:  hierarchy by shortest link path from the homepage (BFS over
               internal links), max depth 5.
-- authority:  authority-flow tree, same format as the crawl tree but each
-              page hangs off the source that passes it the MOST authority
+- authority:  authority-flow graph. The tree skeleton hangs each page off
+              the source that passes it the MOST authority
               (source_authority x edge_weight / source_out_weight), max
-              depth 3. Edge width/intensity = amount of authority flowing.
+              depth 3. On top of the skeleton, dashed cross edges show the
+              other strongest inflows per page — including flow back into
+              the homepage — so convergent page->page and page->home flow
+              is visible, not just home->page. Nodes carry inflow/outflow
+              totals and a flow_role (receiver/donor/balanced).
+              Edge width/intensity = amount of authority flowing.
 
 Click any node to re-root its tree; '+N more' groups re-root at the parent.
 """
@@ -25,6 +30,13 @@ CRAWLTREE_MAX_DEPTH = 5    # levels below the root
 AUTHORITY_CHILD_CAP = 10
 AUTHORITY_MAX_DEPTH = 3
 FOCUS_ROOT_CHILD_CAP = 75
+
+# Cross-flow edges (authority mode): extra strongest inflows drawn on top
+# of the tree skeleton so convergent flow is visible.
+CROSS_EDGES_PER_NODE = 2     # additional inflows shown per page
+CROSS_EDGES_TO_ROOT = 3      # inflows shown into the root (page -> home flow)
+CROSS_EDGES_TOTAL_CAP = 120
+FLOW_ROLE_RATIO = 1.25       # inflow/outflow imbalance to call receiver/donor
 
 PAGE_SIZE_MIN, PAGE_SIZE_MAX = 15, 60
 CLUSTER_SIZE_MAX = 90
@@ -68,11 +80,38 @@ class _Graph:
         for e in self.edges:
             self.out_weight[e['source']] = self.out_weight.get(e['source'], 0.0) + e['weight']
 
+        # Total authority flowing in/out of each page (for net-flow roles)
+        # and distinct linking-page counts (edges are already deduped pairs)
+        self.inflow = {}
+        self.outflow = {}
+        self.in_pages = {}
+        self.out_pages = {}
+        for e in self.edges:
+            self.in_pages[e['target']] = self.in_pages.get(e['target'], 0) + 1
+            self.out_pages[e['source']] = self.out_pages.get(e['source'], 0) + 1
+            fl = self.flow(e['source'], e['target'], e['weight'])
+            if fl <= 0:
+                continue
+            self.outflow[e['source']] = self.outflow.get(e['source'], 0.0) + fl
+            self.inflow[e['target']] = self.inflow.get(e['target'], 0.0) + fl
+
     def flow(self, source, target, weight):
         ow = self.out_weight.get(source, 0.0)
         if ow <= 0:
             return 0.0
         return self.metrics[source]['authority_score'] * weight / ow
+
+    def flow_role(self, norm_url):
+        """'receiver' | 'donor' | 'balanced' by in/out flow imbalance"""
+        i = self.inflow.get(norm_url, 0.0)
+        o = self.outflow.get(norm_url, 0.0)
+        if i < 0.1 and o < 0.1:
+            return 'balanced'
+        if i > o * FLOW_ROLE_RATIO:
+            return 'receiver'
+        if o > i * FLOW_ROLE_RATIO:
+            return 'donor'
+        return 'balanced'
 
     def page_node(self, norm_url):
         m = self.metrics[norm_url]
@@ -88,6 +127,11 @@ class _Graph:
             'cluster': cid,
             'cluster_index': self.cluster_index.get(cid, 0),
             'is_orphan': m['is_orphan'],
+            'inflow': round(self.inflow.get(norm_url, 0.0), 1),
+            'outflow': round(self.outflow.get(norm_url, 0.0), 1),
+            'in_pages': self.in_pages.get(norm_url, 0),
+            'out_pages': self.out_pages.get(norm_url, 0),
+            'flow_role': self.flow_role(norm_url),
             'size': _scale(m['authority_score'], 100, PAGE_SIZE_MIN, PAGE_SIZE_MAX),
         }}
 
@@ -132,6 +176,7 @@ def build_graph(pages, links, mode='crawltree', focus=None, expand=None):
         nodes, edges = _emit_tree(g, *_authority_hierarchy(g, focus),
                                   max_depth=AUTHORITY_MAX_DEPTH,
                                   child_cap=AUTHORITY_CHILD_CAP, focused=bool(focus))
+        _add_cross_flow_edges(g, nodes, edges)
     else:
         nodes, edges = _emit_tree(g, *_crawl_hierarchy(g, focus),
                                   max_depth=CRAWLTREE_MAX_DEPTH,
@@ -139,6 +184,40 @@ def build_graph(pages, links, mode='crawltree', focus=None, expand=None):
 
     return {'mode': mode, 'nodes': nodes, 'edges': _edge_widths(edges),
             'clusters': cluster_meta}
+
+
+def _add_cross_flow_edges(g, nodes, edges):
+    """Overlay the strongest non-skeleton inflows between visible pages.
+
+    The tree skeleton shows one parent per page (its strongest source).
+    Real authority converges from many sources and also flows back to the
+    homepage, so for every visible page we add up to CROSS_EDGES_PER_NODE
+    dashed edges from its next-strongest visible sources (CROSS_EDGES_TO_ROOT
+    for the root, which the skeleton can never point into).
+    """
+    emitted = {n['data']['id'] for n in nodes if n['data'].get('type') == 'page'}
+    existing = {(e['data']['source'], e['data']['target']) for e in edges}
+    root_id = next((n['data']['id'] for n in nodes if n['data'].get('is_root')), None)
+
+    candidates = {}  # target -> [(flow, source)]
+    for e in g.edges:
+        s, t = e['source'], e['target']
+        if s not in emitted or t not in emitted or (s, t) in existing:
+            continue
+        fl = g.flow(s, t, e['weight'])
+        if fl > 0:
+            candidates.setdefault(t, []).append((fl, s))
+
+    cross = []
+    for t, sources in candidates.items():
+        sources.sort(reverse=True)
+        cap = CROSS_EDGES_TO_ROOT if t == root_id else CROSS_EDGES_PER_NODE
+        cross.extend((fl, s, t) for fl, s in sources[:cap])
+
+    cross.sort(reverse=True)
+    for fl, s, t in cross[:CROSS_EDGES_TOTAL_CAP]:
+        edges.append({'data': {'id': f'x:{s}->{t}', 'source': s, 'target': t,
+                               'flow': round(fl, 2), 'cross': True}})
 
 
 def _resolve_root(g, focus):

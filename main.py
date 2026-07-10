@@ -25,6 +25,10 @@ LOCAL_USER_ID = 1
 app = Flask(__name__, template_folder='web/templates', static_folder='web/static')
 app.secret_key = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
 
+# Always serve fresh templates/static so UI changes appear without stale caches
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+
 # Enable compression for all responses
 Compress(app)
 
