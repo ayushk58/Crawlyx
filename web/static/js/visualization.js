@@ -5,6 +5,9 @@
  *  - Crawl Tree (default): hierarchy by shortest link path, depth <= 5.
  *  - Authority Flow: pages hang off the source passing them the most
  *    authority, depth <= 3; stronger flow = brighter, thicker line.
+ *    Skeleton edges render as tapered ribbons (wide at the source,
+ *    narrow at the target) on a canvas underlay, so authority visibly
+ *    "drains" downstream. Cross-flow edges stay dashed Cytoscape edges.
  *
  * Click a node to re-root its tree; '+N more' groups re-root at the parent.
  */
@@ -277,6 +280,13 @@ function initVisualization() {
             {
                 selector: 'edge.dimmed',
                 style: { 'opacity': 0.1 }
+            },
+            {
+                // Skeleton flow edges are drawn as tapered ribbons on the
+                // underlay canvas instead; keep the Cytoscape edge for
+                // hierarchy/layout but never paint it.
+                selector: 'edge.taper-hidden',
+                style: { 'opacity': 0 }
             }
         ],
         layout: { name: 'preset' },
@@ -286,7 +296,159 @@ function initVisualization() {
     });
 
     setupInteractions();
+    cy.on('render', scheduleTaperDraw);
     loadFlowGraph(vizMode);
+}
+
+/**
+ * Tapered flow ribbons (authority mode)
+ *
+ * Cytoscape edges have one width for their whole length, so the skeleton
+ * edges are hidden ('taper-hidden') and redrawn here as filled ribbons on
+ * a canvas that sits UNDER Cytoscape's own canvases: wide where the
+ * authority leaves the parent, narrow where it reaches the child. Same
+ * cubic geometry as flowEdgeGeometry(), same width scale, same data.
+ */
+let taperCanvas = null;
+let taperRaf = null;
+
+function ensureTaperCanvas() {
+    if (taperCanvas) return taperCanvas;
+    const container = document.getElementById('cy');
+    if (!container) return null;
+    taperCanvas = document.createElement('canvas');
+    taperCanvas.setAttribute('data-id', 'taper-layer');
+    taperCanvas.style.position = 'absolute';
+    taperCanvas.style.top = '0';
+    taperCanvas.style.left = '0';
+    taperCanvas.style.pointerEvents = 'none';
+    // First child + no z-index => painted beneath Cytoscape's canvases
+    container.insertBefore(taperCanvas, container.firstChild);
+    return taperCanvas;
+}
+
+function scheduleTaperDraw() {
+    if (taperRaf) return;
+    taperRaf = requestAnimationFrame(() => {
+        taperRaf = null;
+        drawTaperLayer();
+    });
+}
+
+function taperColor(intensity, alpha) {
+    // weak flow -> pale mint, strong flow -> deep emerald
+    const lo = [191, 227, 207], hi = [26, 138, 79];
+    const t = Math.sqrt(Math.max(0, Math.min(1, intensity)));
+    const c = lo.map((l, i) => Math.round(l + (hi[i] - l) * t));
+    return `rgba(${c[0]},${c[1]},${c[2]},${alpha})`;
+}
+
+function cubicPoint(p0, p1, p2, p3, u) {
+    const mt = 1 - u;
+    const a = mt * mt * mt, b = 3 * mt * mt * u, c = 3 * mt * u * u, d = u * u * u;
+    return {
+        x: a * p0.x + b * p1.x + c * p2.x + d * p3.x,
+        y: a * p0.y + b * p1.y + c * p2.y + d * p3.y
+    };
+}
+
+function drawTaperLayer() {
+    const canvas = ensureTaperCanvas();
+    if (!canvas || !cy) return;
+
+    const container = document.getElementById('cy');
+    const w = container.clientWidth, h = container.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+        canvas.style.width = w + 'px';
+        canvas.style.height = h + 'px';
+    }
+
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    if (vizMode !== 'authority') return;
+
+    const zoom = cy.zoom(), pan = cy.pan();
+    const toScreen = (p) => ({ x: p.x * zoom + pan.x, y: p.y * zoom + pan.y });
+
+    const skeleton = cy.edges('.taper-hidden');
+    if (skeleton.length === 0) return;
+
+    let maxWidth = 1;
+    skeleton.forEach(e => { maxWidth = Math.max(maxWidth, e.data('width') || 1); });
+
+    const SAMPLES = 22;
+
+    skeleton.forEach(e => {
+        const s = e.source().position(), t = e.target().position();
+        const dx = t.x - s.x, dy = t.y - s.y;
+        if (dx * dx + dy * dy < 1) return;
+
+        // Same vertical cubic as flowEdgeGeometry(): control points at mid-y
+        const ym = s.y + dy / 2;
+        const c1 = { x: s.x, y: ym }, c2 = { x: t.x, y: ym };
+
+        // Trim ends by node radius so ribbons meet the circles cleanly
+        const srcR = ((e.source().data('size') || 20) / 2) + 1;
+        const tgtR = ((e.target().data('size') || 20) / 2) + 1;
+
+        let pts = [];
+        for (let i = 0; i <= SAMPLES; i++) {
+            pts.push(cubicPoint(s, c1, c2, t, i / SAMPLES));
+        }
+        const distTo = (p, q) => Math.hypot(p.x - q.x, p.y - q.y);
+        while (pts.length > 3 && distTo(pts[0], s) < srcR) pts.shift();
+        while (pts.length > 3 && distTo(pts[pts.length - 1], t) < tgtR) pts.pop();
+        if (pts.length < 3) return;
+
+        // Ribbon half-widths (model units): wide at source, narrow at target
+        const flowWidth = e.data('width') || 1;   // 1..10 from _edge_widths()
+        const halfStart = (flowWidth * 1.25) / 2;
+        const halfEnd = Math.max(0.4, flowWidth * 0.18) / 2;
+
+        const left = [], right = [];
+        for (let i = 0; i < pts.length; i++) {
+            const prev = pts[Math.max(0, i - 1)], next = pts[Math.min(pts.length - 1, i + 1)];
+            let nx = -(next.y - prev.y), ny = next.x - prev.x;
+            const nlen = Math.hypot(nx, ny) || 1;
+            nx /= nlen; ny /= nlen;
+            const f = i / (pts.length - 1);
+            const hw = halfStart + (halfEnd - halfStart) * f;
+            left.push({ x: pts[i].x + nx * hw, y: pts[i].y + ny * hw });
+            right.push({ x: pts[i].x - nx * hw, y: pts[i].y - ny * hw });
+        }
+
+        const dimmed = e.hasClass('dimmed');
+        const intensity = flowWidth / maxWidth;
+        const sScr = toScreen(pts[0]), tScr = toScreen(pts[pts.length - 1]);
+        const grad = ctx.createLinearGradient(sScr.x, sScr.y, tScr.x, tScr.y);
+        if (dimmed) {
+            grad.addColorStop(0, taperColor(intensity, 0.08));
+            grad.addColorStop(1, taperColor(intensity, 0.04));
+        } else {
+            grad.addColorStop(0, taperColor(intensity, 0.9));
+            grad.addColorStop(1, taperColor(intensity * 0.7, 0.45));
+        }
+
+        ctx.beginPath();
+        const first = toScreen(left[0]);
+        ctx.moveTo(first.x, first.y);
+        for (let i = 1; i < left.length; i++) {
+            const p = toScreen(left[i]);
+            ctx.lineTo(p.x, p.y);
+        }
+        for (let i = right.length - 1; i >= 0; i--) {
+            const p = toScreen(right[i]);
+            ctx.lineTo(p.x, p.y);
+        }
+        ctx.closePath();
+        ctx.fillStyle = grad;
+        ctx.fill();
+    });
 }
 
 /**
@@ -490,12 +652,15 @@ async function loadFlowGraph(mode, focus = null) {
         cy.elements().remove();
         cy.add([...nodes, ...edges]).edges().forEach(e => {
             if (mode === 'authority') {
-                e.addClass(e.data('cross') ? 'flow-edge cross-edge' : 'flow-edge');
+                // Skeleton edges are painted as tapered ribbons on the
+                // underlay canvas; only cross-flow edges stay visible.
+                e.addClass(e.data('cross') ? 'flow-edge cross-edge' : 'flow-edge taper-hidden');
             } else {
                 e.addClass('tree-edge');
             }
         });
         applyFlowLayout(mode);
+        scheduleTaperDraw();
 
         updateVizBreadcrumb();
         renderVizLegend(mode, data.clusters);
@@ -740,7 +905,7 @@ function renderVizLegend(mode, clusters) {
         el.innerHTML = [
             `<div class="legend-item"><span class="legend-color" style="background: linear-gradient(to right, #6ed6a0, #0a7a40); width: 36px; border-radius: 4px;"></span><span>size + shade = authority</span></div>`,
             item('#ef4444', 'No authority'),
-            note('Line width = authority passed &middot; dashed = other top inflows (incl. back to home) &middot; click a node for numbers')
+            note('Tapered line = authority passed, draining downstream &middot; dashed = other top inflows (incl. back to home) &middot; click a node for numbers')
         ].join('');
     } else {
         el.innerHTML = [
@@ -780,7 +945,12 @@ function resetVisualization() {
 
 function exportVisualizationImage() {
     if (!cy) return;
+    // The taper underlay isn't part of Cytoscape's export; reveal the
+    // hidden skeleton edges so the exported image keeps its structure.
+    const hidden = cy.edges('.taper-hidden');
+    hidden.removeClass('taper-hidden');
     const png = cy.png({ output: 'blob', bg: '#ffffff', full: true, scale: 2 });
+    hidden.addClass('taper-hidden');
     const url = URL.createObjectURL(png);
     const link = document.createElement('a');
     link.href = url;
@@ -795,6 +965,7 @@ function clearVisualization() {
     if (cy) {
         cy.elements().remove();
     }
+    scheduleTaperDraw();
 
     const container = document.getElementById('cy');
     if (container) {

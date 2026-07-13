@@ -24,13 +24,15 @@ def classify_fetch_error(exc_or_msg):
     Falls back to message inspection.
 
     Returns one of: 'dns_not_found', 'timeout', 'connection_refused',
-    'ssl_error', 'connection_error'.
+    'ssl_error', 'too_many_redirects', 'connection_error'.
     """
     if isinstance(exc_or_msg, BaseException):
         seen = set()
         cur = exc_or_msg
         while cur is not None and id(cur) not in seen:
             seen.add(id(cur))
+            if isinstance(cur, requests.exceptions.TooManyRedirects):
+                return 'too_many_redirects'
             if isinstance(cur, socket.gaierror):
                 return 'dns_not_found'
             if isinstance(cur, ssl.SSLError) or isinstance(cur, requests.exceptions.SSLError):
@@ -56,6 +58,8 @@ def classify_fetch_error(exc_or_msg):
     )
     if any(m in msg for m in dns_markers):
         return 'dns_not_found'
+    if 'redirect' in msg and ('exceeded' in msg or 'too many' in msg):
+        return 'too_many_redirects'
     if 'timed out' in msg or 'timeout' in msg:
         return 'timeout'
     if 'refused' in msg or 'err_connection_refused' in msg:
@@ -131,6 +135,9 @@ class WebCrawler:
 
         # Robots.txt cache
         self._robots_cache = {}
+
+        # URLs found in XML sitemaps (for sitemap-vs-crawl reconciliation)
+        self.sitemap_urls = set()
 
         # Image status cache (avoids re-checking the same image URL across pages)
         self._image_status_cache = {}
@@ -396,11 +403,13 @@ class WebCrawler:
         self.memory_monitor.start_monitoring()
         self.user_memory.reset()
         self.diagnostics = self._empty_diagnostics()
+        self.sitemap_urls = set()
 
     def _discover_and_add_sitemap_urls(self, base_url):
         """Discover sitemaps and add URLs to crawl queue"""
         sitemap_urls = self.sitemap_parser.discover_sitemaps(base_url)
         self.diagnostics['sitemap_found'] = len(sitemap_urls) > 0
+        self.sitemap_urls = set(sitemap_urls)
 
         added_count = 0
         filtered_count = 0
@@ -520,6 +529,9 @@ class WebCrawler:
             if loaded_issues:
                 self.issue_detector.detected_issues = loaded_issues
 
+            # One-shot status/index rebuild for the loaded data
+            self.link_manager.update_link_statuses(self.crawl_results)
+
             print(f"Loaded {len(self.crawl_results)} URLs, {len(loaded_links)} links, {len(loaded_issues)} issues from database")
 
             # Account for loaded data in per-user memory tracker
@@ -612,9 +624,8 @@ class WebCrawler:
         # Get link manager stats
         link_stats = self.link_manager.get_stats() if self.link_manager else {'discovered': 0}
 
-        # Update link statuses before returning (ensures all crawled URLs have their status)
-        if self.link_manager:
-            self.link_manager.update_link_statuses(self.crawl_results)
+        # Link statuses are kept current incrementally via record_status()
+        # (loaded/resumed crawls run update_link_statuses() once at load time)
 
         # Update memory stats
         self.memory_monitor.update()
@@ -815,6 +826,9 @@ class WebCrawler:
                                         self.stats['depth'] = max(self.stats['depth'], result.get('depth', 0))
                                         print(f"Added URL to results: {result['url']} - Total in results: {len(self.crawl_results)}")
 
+                                    # Record status so existing/future links to this URL resolve in O(1)
+                                    self.link_manager.record_status(result['url'], result.get('status_code', 0))
+
                                     # Track fetch-error diagnostics
                                     self._record_result_diagnostics(result)
 
@@ -858,15 +872,8 @@ class WebCrawler:
                     print(f"Error in crawl worker: {e}")
                     time.sleep(1)
 
-        # Update all linked_from fields before completing
-        self._update_all_linked_from()
-
-        # Run duplication detection on all crawled content
-        if self.issue_detector and self.config.get('enable_duplication_check', True):
-            print("Running duplication detection...")
-            duplication_threshold = self.config.get('duplication_threshold', 0.85)
-            self.issue_detector.detect_duplication_issues(self.crawl_results, duplication_threshold)
-            print(f"Duplication detection complete. Total issues: {len(self.issue_detector.get_issues())}")
+        # Post-crawl analysis (linked_from, duplication, redirects, sitemap)
+        self._run_post_crawl_analysis()
 
         # Save final data and set appropriate status
         if self.db_save_enabled and self.crawl_id:
@@ -971,7 +978,9 @@ class WebCrawler:
                 'external_links': 0,
                 'internal_links': 0,
                 'response_time': 0,
-                'redirects': [],
+                'redirects': [{'url': h.url, 'status_code': h.status_code}
+                              for h in response.history],
+                'final_url': response.url if response.history else '',
                 'hreflang': [],
                 'schema_org': [],
                 'linked_from': []
@@ -995,7 +1004,7 @@ class WebCrawler:
 
                 # Collect all links
                 links_before = len(self.link_manager.all_links)
-                self.link_manager.collect_all_links(soup, url, self.crawl_results)
+                self.link_manager.collect_all_links(soup, url)
                 links_after = len(self.link_manager.all_links)
 
                 # Track + batch new links
@@ -1130,7 +1139,7 @@ class WebCrawler:
 
             # Collect all links
             links_before = len(self.link_manager.all_links)
-            self.link_manager.collect_all_links(soup, url, self.crawl_results)
+            self.link_manager.collect_all_links(soup, url)
             links_after = len(self.link_manager.all_links)
 
             # Track + batch new links
@@ -1230,6 +1239,9 @@ class WebCrawler:
                                     self.stats['depth'] = max(self.stats['depth'], result.get('depth', 0))
                                     print(f"Added URL to results (JS): {result['url']} - Total in results: {len(self.crawl_results)}")
 
+                                # Record status so existing/future links to this URL resolve in O(1)
+                                self.link_manager.record_status(result['url'], result.get('status_code', 0))
+
                                 # Track fetch-error diagnostics
                                 self._record_result_diagnostics(result)
 
@@ -1262,15 +1274,8 @@ class WebCrawler:
                 self.diagnostics['stopped_by_max_urls'] = True
 
         finally:
-            # Update all linked_from fields before completing
-            self._update_all_linked_from()
-
-            # Run duplication detection on all crawled content
-            if self.issue_detector and self.config.get('enable_duplication_check', True):
-                print("Running duplication detection...")
-                duplication_threshold = self.config.get('duplication_threshold', 0.85)
-                self.issue_detector.detect_duplication_issues(self.crawl_results, duplication_threshold)
-                print(f"Duplication detection complete. Total issues: {len(self.issue_detector.get_issues())}")
+            # Post-crawl analysis (linked_from, duplication, redirects, sitemap)
+            self._run_post_crawl_analysis()
 
             # Save final data and set appropriate status
             if self.db_save_enabled and self.crawl_id:
@@ -1282,6 +1287,45 @@ class WebCrawler:
             await self.js_renderer.cleanup()
             self.is_running = False
             print(f"Crawl completed. Discovered: {self.stats['discovered']}, Crawled: {self.stats['crawled']}")
+
+    def _run_post_crawl_analysis(self):
+        """Post-crawl analysis shared by both crawl workers.
+
+        Updates linked_from data, then runs fuzzy duplication (capped),
+        redirect chain/loop detection, duplicate title/meta/H1 grouping,
+        and sitemap-vs-crawl reconciliation. New issues are tracked and
+        batched for database persistence.
+        """
+        self._update_all_linked_from()
+
+        if not self.issue_detector:
+            return
+
+        issues_before = len(self.issue_detector.detected_issues)
+
+        if self.config.get('enable_duplication_check', True):
+            print("Running duplication detection...")
+            duplication_threshold = self.config.get('duplication_threshold', 0.85)
+            self.issue_detector.detect_duplication_issues(self.crawl_results, duplication_threshold)
+
+        print("Running redirect chain/loop detection...")
+        self.issue_detector.detect_redirect_issues(self.crawl_results)
+
+        print("Running duplicate title/meta/H1 grouping...")
+        self.issue_detector.detect_duplicate_group_issues(self.crawl_results)
+
+        print("Running sitemap-vs-crawl reconciliation...")
+        self.issue_detector.detect_sitemap_issues(self.sitemap_urls, self.crawl_results)
+
+        # Track + batch issues added by post-crawl analysis
+        issues_after = len(self.issue_detector.detected_issues)
+        if issues_after > issues_before:
+            new_issues = self.issue_detector.detected_issues[issues_before:issues_after]
+            self.user_memory.track_issues(new_issues)
+            if self.db_save_enabled:
+                self.unsaved_issues.extend(new_issues)
+
+        print(f"Post-crawl analysis complete. Total issues: {len(self.issue_detector.get_issues())}")
 
     def _update_all_linked_from(self):
         """Update linked_from field for all crawled URLs based on collected source_pages data"""

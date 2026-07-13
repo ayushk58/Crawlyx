@@ -4,6 +4,12 @@ from fnmatch import fnmatch
 from urllib.parse import urlparse
 from difflib import SequenceMatcher
 
+from src.analysis.url_normalizer import normalize_url
+
+# Pairwise fuzzy duplication is O(n^2); beyond this many pages it is skipped
+# (exact duplicate title/meta/H1 grouping still runs and scales linearly).
+MAX_PAGES_FOR_FUZZY_DUPLICATION = 800
+
 
 class IssueDetector:
     """Detects SEO and technical issues in crawled pages"""
@@ -147,7 +153,8 @@ class IssueDetector:
                 'connection_error': ('Connection Error',
                                      'Could not connect to the server.'),
             }
-            if error_type and error_type != 'file_too_large':
+            # too_many_redirects is reported by detect_redirect_issues as a Redirect Loop
+            if error_type and error_type not in ('file_too_large', 'too_many_redirects'):
                 title, default_details = error_label_map.get(
                     error_type, ('No Response', 'No HTTP response received.')
                 )
@@ -363,14 +370,212 @@ class IssueDetector:
                     'details': f'Image returned {status}: {img_url}'
                 })
 
-    def detect_duplication_issues(self, all_results, similarity_threshold=0.85):
+    def detect_redirect_issues(self, all_results):
+        """Detect redirect chains (>1 hop), loops, and redirects ending in errors.
+
+        Uses the per-URL redirect hop list captured from response.history.
+        Runs in O(n) over crawl results.
+        """
+        issues = []
+
+        for result in all_results:
+            url = result.get('url', '')
+            if self._should_exclude(url):
+                continue
+
+            # requests aborts loops with TooManyRedirects (classified upstream)
+            if result.get('error_type') == 'too_many_redirects':
+                issues.append({
+                    'url': url,
+                    'type': 'error',
+                    'category': 'Redirects',
+                    'issue': 'Redirect Loop',
+                    'details': result.get('error') or 'URL redirects in a loop (too many redirects)'
+                })
+                continue
+
+            redirects = result.get('redirects') or []
+            if not redirects:
+                continue
+
+            hop_urls = [h.get('url', '') for h in redirects]
+            final_url = result.get('final_url', '')
+            chain_display = ' -> '.join(hop_urls + ([final_url] if final_url else []))
+            hops = len(redirects)
+
+            # Loop: the same URL appears twice in the hop sequence
+            seen = set()
+            is_loop = False
+            for hop in hop_urls + ([final_url] if final_url else []):
+                key = normalize_url(hop, aggressive=True)
+                if key in seen:
+                    is_loop = True
+                    break
+                seen.add(key)
+
+            if is_loop:
+                issues.append({
+                    'url': url,
+                    'type': 'error',
+                    'category': 'Redirects',
+                    'issue': 'Redirect Loop',
+                    'details': f'Redirect sequence revisits a URL: {chain_display}'
+                })
+            elif hops >= 2:
+                issues.append({
+                    'url': url,
+                    'type': 'warning',
+                    'category': 'Redirects',
+                    'issue': 'Redirect Chain',
+                    'details': f'{hops} hops: {chain_display}'
+                })
+
+            status_code = result.get('status_code', 0)
+            if status_code >= 400:
+                issues.append({
+                    'url': url,
+                    'type': 'error',
+                    'category': 'Redirects',
+                    'issue': 'Redirect to Error Page',
+                    'details': f'Redirect ends in HTTP {status_code}: {chain_display}'
+                })
+
+        with self.issues_lock:
+            self.detected_issues.extend(issues)
+
+    def detect_duplicate_group_issues(self, all_results):
+        """Group internal 200 pages sharing identical titles, meta descriptions,
+        or H1s and flag every member of each group. Runs in O(n).
+        """
+        field_specs = (
+            ('title', 'Duplicate Title'),
+            ('meta_description', 'Duplicate Meta Description'),
+            ('h1', 'Duplicate H1'),
+        )
+        groups = {field: {} for field, _ in field_specs}
+
+        for result in all_results:
+            if result.get('status_code') != 200 or not result.get('is_internal', True):
+                continue
+            # A redirecting URL serves its destination's content - not a distinct page
+            if result.get('redirects'):
+                continue
+            url = result.get('url', '')
+            if self._should_exclude(url):
+                continue
+            for field, _ in field_specs:
+                value = (result.get(field) or '').strip()
+                if not value:
+                    continue
+                # Case- and whitespace-insensitive grouping key
+                key = ' '.join(value.lower().split())
+                groups[field].setdefault(key, []).append((url, value))
+
+        issues = []
+        for field, issue_name in field_specs:
+            for members in groups[field].values():
+                if len(members) < 2:
+                    continue
+                urls = [u for u, _ in members]
+                display_value = members[0][1]
+                if len(display_value) > 60:
+                    display_value = display_value[:57] + '...'
+                sample = urls[:4]
+                for url in urls:
+                    others = [o for o in sample if o != url][:3]
+                    issues.append({
+                        'url': url,
+                        'type': 'warning',
+                        'category': 'Duplication',
+                        'issue': issue_name,
+                        'details': f'"{display_value}" is shared by {len(urls)} pages '
+                                   f'(e.g. {", ".join(others)})'
+                    })
+
+        with self.issues_lock:
+            self.detected_issues.extend(issues)
+
+    def detect_sitemap_issues(self, sitemap_urls, all_results):
+        """Reconcile XML sitemap URLs against crawl results.
+
+        Flags: sitemap URLs never crawled, sitemap URLs returning non-200,
+        and crawled internal HTML pages missing from the sitemap.
+        No-op when no sitemap was found. Runs in O(n).
+        """
+        if not sitemap_urls:
+            return
+
+        sitemap_map = {}  # normalized form -> original sitemap URL
+        for url in sitemap_urls:
+            sitemap_map.setdefault(normalize_url(url, aggressive=True), url)
+
+        crawled = {}  # normalized form -> result
+        for result in all_results:
+            crawled.setdefault(normalize_url(result.get('url', ''), aggressive=True), result)
+
+        issues = []
+
+        for key, original_url in sitemap_map.items():
+            if self._should_exclude(original_url):
+                continue
+            result = crawled.get(key)
+            if result is None:
+                issues.append({
+                    'url': original_url,
+                    'type': 'warning',
+                    'category': 'Sitemap',
+                    'issue': 'In Sitemap, Not Crawled',
+                    'details': 'URL is listed in the XML sitemap but was not crawled '
+                               '(blocked by robots.txt, filtered, or unreachable)'
+                })
+            else:
+                status_code = result.get('status_code', 0)
+                if status_code != 200:
+                    issues.append({
+                        'url': original_url,
+                        'type': 'error',
+                        'category': 'Sitemap',
+                        'issue': 'Sitemap URL Not Indexable',
+                        'details': f'Sitemap URL returned HTTP {status_code}'
+                    })
+
+        for key, result in crawled.items():
+            if key in sitemap_map:
+                continue
+            url = result.get('url', '')
+            if (not result.get('is_internal', True)
+                    or result.get('status_code') != 200
+                    or result.get('redirects')  # redirecting URLs aren't canonical pages
+                    or 'text/html' not in (result.get('content_type') or '')
+                    or self._should_exclude(url)):
+                continue
+            issues.append({
+                'url': url,
+                'type': 'info',
+                'category': 'Sitemap',
+                'issue': 'Crawled, Not in Sitemap',
+                'details': 'Page was discovered by crawling but is missing from the XML sitemap'
+            })
+
+        with self.issues_lock:
+            self.detected_issues.extend(issues)
+
+    def detect_duplication_issues(self, all_results, similarity_threshold=0.85,
+                                  max_pages=MAX_PAGES_FOR_FUZZY_DUPLICATION):
         """
         Detect content duplication across all crawled pages.
 
         Args:
             all_results: List of all crawled result dictionaries
             similarity_threshold: Minimum similarity ratio to flag as duplicate (0.0-1.0)
+            max_pages: skip the O(n^2) pairwise scan beyond this many pages
+                (exact duplicate grouping still covers large crawls)
         """
+        if len(all_results) > max_pages:
+            print(f"Skipping pairwise content-duplication scan: {len(all_results)} pages "
+                  f"exceeds cap of {max_pages} (duplicate title/meta/H1 grouping still runs)")
+            return
+
         issues = []
         processed_pairs = set()
 

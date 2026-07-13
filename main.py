@@ -752,6 +752,8 @@ def load_crawl_into_session(crawl_id):
             for link in links:
                 link_key = f"{link['source_url']}|{link['target_url']}"
                 crawler.link_manager.links_set.add(link_key)
+            # One-shot status/index rebuild for the loaded data
+            crawler.link_manager.update_link_statuses(urls)
 
         # Load issues into issue detector
         if crawler.issue_detector:

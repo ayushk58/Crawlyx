@@ -37,14 +37,20 @@ class SitemapParser:
         print(f"Discovering sitemaps for {base_domain}...")
 
         all_urls = []
+        seen_sitemaps = set()
         for sitemap_url in sitemap_urls:
+            # robots.txt often re-declares the default locations
+            if sitemap_url in seen_sitemaps:
+                continue
+            seen_sitemaps.add(sitemap_url)
             try:
                 urls = self._parse_sitemap(sitemap_url, depth=1)
                 all_urls.extend(urls)
             except Exception as e:
                 print(f"Failed to parse sitemap {sitemap_url}: {e}")
 
-        return all_urls
+        # Dedupe while preserving order (indexes can repeat URLs)
+        return list(dict.fromkeys(all_urls))
 
     def _get_sitemaps_from_robots(self, base_domain):
         """Extract sitemap URLs from robots.txt"""

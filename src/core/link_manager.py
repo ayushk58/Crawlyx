@@ -17,6 +17,8 @@ class LinkManager:
         self.all_links = []
         self.links_set = set()
         self.source_pages = {}  # Maps target_url -> list of source_urls
+        self.url_status = {}  # Maps crawled url -> status_code (O(1) lookups)
+        self.links_by_target = {}  # Maps target_url -> list of link dicts
 
         # Diagnostics counters
         self.normalized_seen = set()  # aggressive-normalized forms of discovered URLs
@@ -67,7 +69,7 @@ class LinkManager:
                         self.discovered_urls.append((clean_url, depth))
                         self._track_discovery_diagnostics(clean_url)
 
-    def collect_all_links(self, soup, source_url, crawl_results):
+    def collect_all_links(self, soup, source_url):
         """Collect all links for the Links tab display"""
         links = soup.find_all('a', href=True)
 
@@ -96,12 +98,8 @@ class LinkManager:
                 base_domain_clean = self.base_domain.replace('www.', '', 1)
                 is_internal = target_domain_clean == base_domain_clean
 
-                # Find the status of the target URL if we've crawled it
-                target_status = None
-                for result in crawl_results:
-                    if result['url'] == clean_url:
-                        target_status = result['status_code']
-                        break
+                # Find the status of the target URL if we've crawled it (O(1))
+                target_status = self.url_status.get(clean_url)
 
                 # Determine placement (navigation, footer, body)
                 placement = self._detect_link_placement(link)
@@ -130,6 +128,7 @@ class LinkManager:
                     if link_key not in self.links_set:
                         self.links_set.add(link_key)
                         self.all_links.append(link_data)
+                        self.links_by_target.setdefault(clean_url, []).append(link_data)
 
             except Exception:
                 continue
@@ -157,11 +156,7 @@ class LinkManager:
                 base_domain_clean = self.base_domain.replace('www.', '', 1)
                 is_internal = target_domain_clean == base_domain_clean
 
-                target_status = None
-                for result in crawl_results:
-                    if result['url'] == clean_url:
-                        target_status = result['status_code']
-                        break
+                target_status = self.url_status.get(clean_url)
 
                 link_data = {
                     'source_url': source_url,
@@ -178,6 +173,7 @@ class LinkManager:
                     if link_key not in self.links_set:
                         self.links_set.add(link_key)
                         self.all_links.append(link_data)
+                        self.links_by_target.setdefault(clean_url, []).append(link_data)
 
             except Exception:
                 continue
@@ -253,16 +249,28 @@ class LinkManager:
                 'parameterized_urls': self.parameterized_count
             }
 
-    def update_link_statuses(self, crawl_results):
-        """Update target_status for all links based on crawl results"""
-        # Build a fast lookup dict
-        status_lookup = {result['url']: result['status_code'] for result in crawl_results}
-
+    def record_status(self, url, status_code):
+        """Record a crawled URL's status and patch links pointing at it (O(1) amortized)"""
         with self.links_lock:
+            self.url_status[url] = status_code
+            for link in self.links_by_target.get(url, ()):
+                link['target_status'] = status_code
+
+    def update_link_statuses(self, crawl_results):
+        """Rebuild status lookup + target index and update all links.
+
+        Linear one-shot pass for loaded/resumed crawls; live crawls keep
+        statuses current incrementally via record_status().
+        """
+        with self.links_lock:
+            self.url_status = {result['url']: result['status_code'] for result in crawl_results}
+
+            self.links_by_target = {}
             for link in self.all_links:
-                target_url = link['target_url']
-                if target_url in status_lookup:
-                    link['target_status'] = status_lookup[target_url]
+                self.links_by_target.setdefault(link['target_url'], []).append(link)
+                status = self.url_status.get(link['target_url'])
+                if status is not None:
+                    link['target_status'] = status
 
     def get_source_pages(self, url):
         """Get list of source pages that link to this URL"""
@@ -283,3 +291,5 @@ class LinkManager:
         with self.links_lock:
             self.all_links.clear()
             self.links_set.clear()
+            self.url_status.clear()
+            self.links_by_target.clear()

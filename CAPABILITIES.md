@@ -191,9 +191,28 @@ Automated checks run during and after the crawl. Issues are grouped by type in t
 | Large page size (>3MB) | Error |
 | Moderate page size (>1MB) | Warning |
 
+### Redirects (post-crawl)
+
+| Issue | Type |
+|-------|------|
+| Redirect chain (>1 hop, full hop path shown) | Warning |
+| Redirect loop (revisited URL or too many redirects) | Error |
+| Redirect ending in a 4xx/5xx page | Error |
+
+### Sitemap reconciliation (post-crawl)
+
+| Issue | Type |
+|-------|------|
+| In sitemap, not crawled (blocked, filtered, or unreachable) | Warning |
+| Sitemap URL returned non-200 | Error |
+| Crawled, not in sitemap (internal 200 HTML pages) | Info |
+
+Only runs when an XML sitemap was discovered.
+
 ### Duplication (post-crawl)
 
-- **Metadata duplicate detection** — compares title, meta description, H1, and word count across page pairs (configurable similarity threshold, default 0.85)
+- **Duplicate title / meta description / H1 grouping** — exact (case/whitespace-insensitive) groups across internal 200 pages; every member flagged with group size and sample URLs. Scales linearly to 10k+ URLs.
+- **Metadata duplicate detection** — compares title, meta description, H1, and word count across page pairs (configurable similarity threshold, default 0.85). Pairwise scan is skipped above 800 pages; exact grouping covers large crawls.
 - **Issue exclusion patterns** — skip issue detection for admin/dev paths (configurable)
 
 ---
@@ -241,7 +260,7 @@ Interactive **Cytoscape** graphs in the **Visualization** tab:
 | Mode | Description |
 |------|-------------|
 | **Crawl Tree** | Site hierarchy by shortest link path from homepage (BFS), max depth 5 |
-| **Authority Flow** | Tree by highest authority-passing parent link, max depth 3; edge width = authority flow |
+| **Authority Flow** | Tree by highest authority-passing parent link, max depth 3; tapered ribbon edges (wide at source, narrow at target) = authority flow |
 
 - Click any node to re-root the tree
 - Color-coded by status code and content cluster
@@ -362,8 +381,6 @@ Click any URL to inspect full extracted metadata (title, meta, headings, robots,
 
 These are **not** implemented today:
 
-- Redirect chain / loop reports (redirects are followed and 3xx flagged, but full chains are not surfaced)
-- Duplicate title / meta description grouping (only pairwise metadata similarity)
 - Blocked URL list (only a blocked count)
 - X-Robots-Tag HTTP header (only meta robots checked)
 - Canonical HTTP header (only `<link rel="canonical">`)
@@ -373,7 +390,6 @@ These are **not** implemented today:
 - Raw vs rendered HTML diff
 - Exact body-level duplicate detection
 - Crawl comparison / diff between two runs
-- Sitemap vs crawl reconciliation report
 - Integrations: Google Search Console, Analytics, PageSpeed Insights, Majestic, Moz
 - Rendered screenshots, AMP validation, spelling/grammar, full WCAG/AXE accessibility
 - XML sitemap generation, robots.txt editor
